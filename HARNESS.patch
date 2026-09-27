@@ -1,0 +1,2195 @@
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/.env.example squad-orchestrator-harness/.env.example
+--- squad-orchestrator/.env.example	2026-09-26 14:49:44.284365000 +0000
++++ squad-orchestrator-harness/.env.example	2026-09-27 12:21:36.000000000 +0000
+@@ -16,10 +16,18 @@
+ # seccomp/apparmor/systempaths=unconfined; "false" desliga o bwrap e confia só no container.
+ SANDBOX_NATIVE_ISOLATION=false
+ # Variáveis do host repassadas para a sandbox (chaves do provedor de LLM, token do GitHub...)
+-SANDBOX_ENV_PASSTHROUGH=ANTHROPIC_API_KEY,OPENAI_API_KEY,OPENROUTER_API_KEY,KILO_API_KEY,GITHUB_TOKEN
++# Claude Code usa ANTHROPIC_API_KEY (ou CLAUDE_CODE_OAUTH_TOKEN); Codex usa CODEX_API_KEY ou OPENAI_API_KEY.
++SANDBOX_ENV_PASSTHROUGH=ANTHROPIC_API_KEY,CLAUDE_CODE_OAUTH_TOKEN,OPENAI_API_KEY,CODEX_API_KEY,OPENROUTER_API_KEY,KILO_API_KEY,GITHUB_TOKEN
++
++# Harnesses oferecidos na UI (kilo, claude-code, codex) e o que vem marcado
++HARNESSES=kilo,claude-code,codex
++DEFAULT_HARNESS=kilo
+ 
+ # Driver "external": URL e senha de um `kilo serve` já de pé (útil para dev e para o mock)
+ KILO_EXTERNAL_URL=http://127.0.0.1:4096
++# ...e da ponte de cada harness (vazio = mesma URL do Kilo). A senha é a mesma (KILO_EXTERNAL_PASSWORD).
++EXTERNAL_URL_CLAUDE_CODE=
++EXTERNAL_URL_CODEX=
+ KILO_EXTERNAL_PASSWORD=
+ KILO_EXTERNAL_DIRECTORY=
+ 
+@@ -27,6 +35,11 @@
+ SQUAD_LEAD_AGENT=squad-lead
+ # Modelo padrão opcional no formato provider/model (vazio = default do kilo.jsonc)
+ DEFAULT_MODEL=
++# Modelo padrão das pontes (vazio = padrão do Claude Code / do Codex). Ex.: sonnet, gpt-5-codex
++CLAUDE_CODE_MODEL=
++CODEX_MODEL=
++# Sandbox próprio do Codex dentro do container (danger-full-access = confia só no container)
++CODEX_SANDBOX_MODE=danger-full-access
+ 
+ # Encerra sandboxes ociosas após N minutos
+ IDLE_TTL_MINUTES=30
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/README.md squad-orchestrator-harness/README.md
+--- squad-orchestrator/README.md	2026-09-26 21:11:14.583707000 +0000
++++ squad-orchestrator-harness/README.md	2026-09-27 12:22:06.000000000 +0000
+@@ -1,11 +1,31 @@
+ # squad-orchestrator (POC)
+ 
+-Backend que faz o papel do "mini Kilo Cloud": recebe uma tarefa `(repoUrl, branch, prompt)`, sobe um container por tarefa com `kilo serve`, cria a sessão da squad, assina o SSE do Kilo e republica eventos classificados para a UI web. Ações da UI (follow-up, permissões, reset do board) voltam como POSTs diretos no `kilo serve` da sandbox.
++Backend que faz o papel do "mini Kilo Cloud": recebe uma tarefa `(repoUrl, branch, prompt, harness)`, sobe um container por tarefa com `kilo serve` (ou a ponte do Claude Code / Codex), cria a sessão da squad, assina o SSE do harness e republica eventos classificados para a UI web. Ações da UI (follow-up, permissões, reset do board) voltam como POSTs diretos na sandbox.
+ 
+ ```
+-browser ──HTTPS/SSE──> squad-orchestrator ──HTTP+SSE (Basic kilo:<senha por tarefa>)──> kilo serve (container da tarefa)
++browser ──HTTPS/SSE──> squad-orchestrator ──HTTP+SSE (Basic kilo:<senha por tarefa>)──> kilo serve  (HARNESS=kilo)
++                                                                                    └─> ponte     (HARNESS=claude-code | codex)
+ ```
+ 
++## Harness: Kilo Code, Claude Code ou Codex
++
++A tarefa escolhe o harness na criação (`harness` no `POST /tasks`, seletor na UI). Os três falam o **mesmo protocolo** com o orquestrador: o subconjunto HTTP/SSE do `kilo serve` listado em `src/kilo.ts`. Para Claude Code e Codex, o container sobe `sandbox/bridge` no lugar do `kilo serve`, e a ponte traduz o que o SDK de cada um emite para os eventos do Kilo. Resultado: o orquestrador, o relay e a UI não têm um caminho por harness; só `src/harness.ts` diz o que cada um entrega.
++
++| | Kilo Code | Claude Code | Codex |
++|---|---|---|---|
++| Motor | `kilo serve` | Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`) | `@openai/codex-sdk` (`codex exec --experimental-json`) |
++| Squad no grafo | nativa (tool `task`) | a mesma `sandbox/squad/agents/*.md` vira `agents` do SDK; tool `Agent` vira membro, `parent_tool_use_id` põe cada passo no nó certo | **agente único**; o prompt do líder pede os papéis em sequência |
++| Board | Swarm nativo | **emulado** pela ponte: servidor MCP in-process com `board_post`/`board_read`, mesmo formato de mensagem (INFO/ASK/RESULT/HOLD/VETO) | **não há**; `GET .../board` volta vazio |
++| Permissões | `kilo.jsonc` | `canUseTool` avaliado com o mesmo `permission` do `kilo.jsonc`; o que for `ask` vira `permission.asked` e "Sempre" vale até a sandbox morrer | **não há** aprovação interativa no exec: roda com `approvalPolicy: never`, e o container é o isolamento |
++| Retry do modelo | `session.status retry` | `system/api_retry` → `retry` | erro do turno → `error` |
++| Diff | `/session/:id/diff` | `git diff` contra o HEAD do início (inclui commits e arquivos novos) | idem |
++| Credencial (via `SANDBOX_ENV_PASSTHROUGH`) | a do provedor do Kilo | `ANTHROPIC_API_KEY` ou `CLAUDE_CODE_OAUTH_TOKEN` | `CODEX_API_KEY` ou `OPENAI_API_KEY` |
++| Modelo padrão | `DEFAULT_MODEL` (provider/model) | `CLAUDE_CODE_MODEL` (ex.: `sonnet`) | `CODEX_MODEL` |
++
++Agentes oferecidos: no Claude Code, `squad-lead` (a squad) ou `claude` (Claude Code puro, sem squad nem board); no Codex, só `codex`. O `CLAUDE.md` e o `.claude/` do repo continuam valendo (`settingSources: ["project"]`), como o `.kilo/` no Kilo. O sandbox próprio do Codex (landlock/seccomp) costuma falhar dentro do Docker, então o padrão é `CODEX_SANDBOX_MODE=danger-full-access`, na mesma linha da decisão de isolamento só pelo container.
++
++**Roteiros fake (`BRIDGE_FAKE=1`):** a ponte troca os SDKs por roteiros gravados no formato deles, que passam pelos mesmos mapeamentos. Servem para demo e teste sem LLM, como o `scripts/mock-kilo.ts`.
++
+ ## Rodando
+ 
+ ```bash
+@@ -21,6 +41,15 @@
+ cd /algum/repo && KILO_CONFIG_DIR=$PWD/sandbox/squad KILO_SERVER_PASSWORD=pw kilo serve --port 4096
+ SANDBOX_DRIVER=external KILO_EXTERNAL_PASSWORD=pw KILO_EXTERNAL_DIRECTORY=/algum/repo npm run dev
+ 
++# 1b) Pontes do Claude Code e do Codex com roteiros fake (sem LLM), cada uma num repo git qualquer
++cd sandbox/bridge && npm install
++HARNESS=claude-code PORT=4101 KILO_SERVER_PASSWORD=pw REPO_DIR=/tmp/repo-a SQUAD_DIR=../squad BRIDGE_FAKE=1 npm start &
++HARNESS=codex       PORT=4102 KILO_SERVER_PASSWORD=pw REPO_DIR=/tmp/repo-b SQUAD_DIR=../squad BRIDGE_FAKE=1 npm start &
++cd ../..
++API_TOKEN=tok SANDBOX_DRIVER=external KILO_EXTERNAL_PASSWORD=pw \
++  EXTERNAL_URL_CLAUDE_CODE=http://127.0.0.1:4101 EXTERNAL_URL_CODEX=http://127.0.0.1:4102 npm run dev &
++ORCH_URL=http://127.0.0.1:8080 API_TOKEN=tok HARNESS=claude-code npm run smoke
++
+ # 3) Modelo alvo: um container por tarefa
+ npm run sandbox:build        # imagem squad-sandbox:dev (kilo + git + bwrap + squad)
+ SANDBOX_DRIVER=docker npm run dev
+@@ -49,7 +78,8 @@
+ 
+ | Método | Rota | O que faz |
+ |---|---|---|
+-| POST | `/tasks` | `{ repoUrl, branch?, prompt, agent?, model? }` → 202 e provisiona em background |
++| GET | `/harnesses` | harnesses habilitados (`HARNESSES`), o padrão e as capacidades de cada um |
++| POST | `/tasks` | `{ repoUrl, branch?, prompt, harness?, agent?, model? }` → 202 e provisiona em background |
+ | GET | `/tasks`, `/tasks/:id` | lista / detalhe (status, membros da squad, permissões pendentes) |
+ | GET | `/tasks/:id/events` | SSE de eventos da UI; reconexão com `Last-Event-ID` ou `?after=` faz replay |
+ | POST | `/tasks/:id/prompt` | `{ text, agent? }` follow-up na mesma sessão (inclui `/goal pause`) |
+@@ -81,6 +111,7 @@
+ - Contra `@kilocode/cli` 7.8.1 real: `/global/health` (401 sem auth), `GET /event` com `server.connected`, `POST /session` com `agent`, board retornando `200` vazio antes do primeiro post, `/permission`, `/session/:id/diff`, e os 5 agentes da squad carregados via `KILO_CONFIG_DIR`. O fluxo completo do orquestrador rodou até a chamada ao LLM (parou por falta de credencial de provedor, como esperado).
+ - Fluxo com o mock: squad.member, board.activity, permissão aprovada pela API e retomada, idle.
+ - **Não validado ainda:** o build da imagem Docker (o ambiente onde isto foi escrito bloqueia os mirrors do Debian) e um turno real com LLM.
++- **Harnesses (27/09):** tipos da ponte conferidos contra `@anthropic-ai/claude-agent-sdk` 0.3.283 e `@openai/codex-sdk` 0.157.1. Smoke pelo orquestrador com as pontes em `BRIDGE_FAKE=1`: Claude Code com squad (4 delegações, developer ×2), board com autoria certa por subagente, VETO, permissão de `npm install` aprovada pela API, diff do git e idle; Codex com passos, diff, follow-up e abort. **Não validado:** turno real com LLM em cada ponte e a imagem com a ponte instalada.
+ 
+ ## Decisões e gaps do POC
+ 
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/sandbox/Dockerfile squad-orchestrator-harness/sandbox/Dockerfile
+--- squad-orchestrator/sandbox/Dockerfile	2026-09-26 13:52:12.144312000 +0000
++++ squad-orchestrator-harness/sandbox/Dockerfile	2026-09-27 12:22:41.243970000 +0000
+@@ -1,4 +1,5 @@
+-# Imagem da sandbox: kilo serve + git + bubblewrap. Um container por tarefa.
++# Imagem da sandbox: kilo serve + git + bubblewrap + a ponte de harness (Claude Code e Codex).
++# Um container por tarefa; HARNESS=kilo|claude-code|codex escolhe quem sobe na porta 4096.
+ #
+ # Para usar o seu fork em vez do pacote oficial, publique o CLI forkado num registry
+ # (ou copie o tarball de `bun run build`) e troque KILO_NPM_PACKAGE, ex.:
+@@ -13,11 +14,18 @@
+ 
+ RUN npm install -g "${KILO_NPM_PACKAGE}" && kilo --version
+ 
++# Ponte de harness: Claude Agent SDK e @openai/codex-sdk (cada um traz o binário da plataforma).
++# Roda com o strip-types do Node 22 (sem build). Fica antes da squad para aproveitar o cache.
++COPY bridge/package.json /opt/bridge/package.json
++RUN cd /opt/bridge && npm install --omit=dev && npm cache clean --force
++COPY bridge/src/ /opt/bridge/src/
++
+ # Config da squad fora do repo: kilo.jsonc + agents/*.md. O Kilo carrega KILO_CONFIG_DIR
+ # como diretório de config confiável; .kilo/agents/*.md do próprio repo continua valendo
+ # e pode sobrescrever agentes com o mesmo nome.
+ COPY squad/ /opt/squad/
+ ENV KILO_CONFIG_DIR=/opt/squad \
++    SQUAD_DIR=/opt/squad \
+     KILO_DISABLE_AUTOUPDATE=1 \
+     REPO_DIR=/workspace/repo
+ 
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/sandbox/bridge/.gitignore squad-orchestrator-harness/sandbox/bridge/.gitignore
+--- squad-orchestrator/sandbox/bridge/.gitignore	1970-01-01 00:00:00.000000000 +0000
++++ squad-orchestrator-harness/sandbox/bridge/.gitignore	2026-09-27 12:16:06.000000000 +0000
+@@ -0,0 +1 @@
++node_modules
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/sandbox/bridge/package.json squad-orchestrator-harness/sandbox/bridge/package.json
+--- squad-orchestrator/sandbox/bridge/package.json	1970-01-01 00:00:00.000000000 +0000
++++ squad-orchestrator-harness/sandbox/bridge/package.json	2026-09-27 12:16:06.000000000 +0000
+@@ -0,0 +1,21 @@
++{
++  "name": "squad-harness-bridge",
++  "version": "0.1.0",
++  "private": true,
++  "type": "module",
++  "description": "Ponte dentro da sandbox: expõe Claude Code (Agent SDK) e Codex (codex-sdk) no mesmo subconjunto HTTP/SSE do kilo serve que o orquestrador usa",
++  "engines": { "node": ">=22.18" },
++  "scripts": {
++    "start": "node src/server.ts",
++    "typecheck": "tsc -p . --noEmit"
++  },
++  "dependencies": {
++    "@anthropic-ai/claude-agent-sdk": "^0.3.283",
++    "@openai/codex-sdk": "^0.157.1",
++    "zod": "^4.1.0"
++  },
++  "devDependencies": {
++    "@types/node": "^22.10.0",
++    "typescript": "^5.7.0"
++  }
++}
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/sandbox/bridge/src/claude.ts squad-orchestrator-harness/sandbox/bridge/src/claude.ts
+--- squad-orchestrator/sandbox/bridge/src/claude.ts	1970-01-01 00:00:00.000000000 +0000
++++ squad-orchestrator-harness/sandbox/bridge/src/claude.ts	2026-09-27 12:16:18.000000000 +0000
+@@ -0,0 +1,334 @@
++// Harness Claude Code, via Claude Agent SDK (o mesmo motor do `claude` CLI, sem TTY).
++//
++// Mapeamento para o vocabulário do kilo serve:
++//   squad (agents/*.md)       -> `agents` do SDK (subagentes); o líder vira append do system prompt
++//   tool Agent/Task           -> part.tool = "task" + state.metadata.sessionId (sessão filha sintética)
++//   parent_tool_use_id        -> sessionID da sessão filha (tudo que o subagente faz cai no nó dele)
++//   board_post / board_read   -> servidor MCP in-process "board"; o snapshot sai de GET .../board
++//   canUseTool                -> permission.asked / permission.replied, com a política do kilo.jsonc
++//   system/api_retry          -> session.status retry
++//   result                    -> session.diff + session.status idle + session.idle
++
++import {
++  createSdkMcpServer,
++  query as sdkQuery,
++  tool,
++  type AgentDefinition,
++  type CanUseTool,
++  type Query,
++  type SDKMessage,
++  type SDKUserMessage,
++} from "@anthropic-ai/claude-agent-sdk"
++import { z } from "zod"
++import { AsyncQueue, finishTurn, truncate, type PromptInput, type Runner, type RunnerContext } from "./runner.ts"
++import { alwaysPattern } from "./squad.ts"
++
++type QueryFn = typeof sdkQuery
++
++const SUBAGENT_TOOLS = new Set(["Agent", "Task"])
++const TOOL_NAMES: Record<string, string> = {
++  Read: "read",
++  Write: "write",
++  Edit: "edit",
++  MultiEdit: "edit",
++  NotebookEdit: "edit",
++  Bash: "bash",
++  Glob: "glob",
++  Grep: "grep",
++  LS: "list",
++  WebFetch: "webfetch",
++  WebSearch: "websearch",
++  TodoWrite: "todowrite",
++  mcp__board__board_post: "board_post",
++  mcp__board__board_read: "board_read",
++}
++// Chave da política do kilo.jsonc para cada tool do Claude Code. Tools fora daqui são internas
++// do harness (ToolSearch, TaskOutput...) e passam direto.
++const PERMISSION_KEYS: Record<string, string> = {
++  Read: "read",
++  Write: "edit",
++  Edit: "edit",
++  MultiEdit: "edit",
++  NotebookEdit: "edit",
++  Bash: "bash",
++  Glob: "glob",
++  Grep: "grep",
++  LS: "list",
++  WebFetch: "webfetch",
++  WebSearch: "webfetch",
++  TodoWrite: "todowrite",
++  Agent: "task",
++  Task: "task",
++}
++
++const HARNESS_NOTE = `
++
++## Notas do ambiente (Claude Code)
++- A tool \`task\` citada acima é a tool Agent (ou Task): use \`subagent_type\` com o nome do especialista.
++- O board da squad é o servidor MCP \`board\`: \`board_post\` = mcp__board__board_post { to: "ALL" | "main" | nome do agente, type: INFO|ASK|RESULT|HOLD|VETO, body, reply_to? } e \`board_read\` = mcp__board__board_read.`
++
++export class ClaudeRunner implements Runner {
++  private q?: Query
++  private inbox = new AsyncQueue<SDKUserMessage>()
++  private model?: string
++  private childSession = new Map<string, string>() // tool_use id da Agent -> sessão filha
++  private sessionAgent = new Map<string, string>() // sessão -> nome do agente
++  private toolSession = new Map<string, string>() // tool_use id -> sessão que chamou
++  private tools = new Map<string, { sessionID: string; tool: string; input: Record<string, unknown>; title?: string }>()
++  private boardCalls: { tool: string; input: string; sessionID: string; used: boolean }[] = []
++  private turnOpen = false
++
++  private ctx: RunnerContext
++  private queryFn: QueryFn
++
++  constructor(ctx: RunnerContext, queryFn: QueryFn = sdkQuery) {
++    this.ctx = ctx
++    this.queryFn = queryFn
++    this.sessionAgent.set(ctx.sessionID, ctx.agent)
++  }
++
++  prompt(input: PromptInput) {
++    const { hub, sessionID } = this.ctx
++    if (!this.q) this.start(input.model)
++    else if (input.model && input.model !== this.model) {
++      this.model = input.model
++      void this.q.setModel(input.model).catch(() => {})
++    }
++    hub.userText(sessionID, this.ctx.agent, input.text)
++    this.turnOpen = true
++    hub.status(sessionID, "busy")
++    this.inbox.push({ type: "user", message: { role: "user", content: input.text }, parent_tool_use_id: null })
++  }
++
++  async abort() {
++    this.ctx.hub.rejectAll()
++    await this.q?.interrupt().catch(() => {})
++  }
++
++  close() {
++    this.inbox.close()
++    this.q?.close()
++  }
++
++  private start(model?: string) {
++    const { squad, agent, repoDir } = this.ctx
++    this.model = model
++    const lead = squad[agent]
++    const agents: Record<string, AgentDefinition> = {}
++    if (lead)
++      for (const a of Object.values(squad)) {
++        if (a.name === lead.name || a.mode === "primary") continue
++        agents[a.name] = {
++          description: a.description,
++          prompt: a.prompt + HARNESS_NOTE,
++          ...(a.readOnly ? { disallowedTools: ["Write", "Edit", "MultiEdit", "NotebookEdit"] } : {}),
++        }
++      }
++
++    this.q = this.queryFn({
++      prompt: this.inbox,
++      options: {
++        cwd: repoDir,
++        model,
++        permissionMode: "default",
++        canUseTool: this.canUseTool,
++        agents,
++        mcpServers: lead ? { board: this.boardServer() } : {},
++        // Sem squad (ex.: agente "claude"), é o Claude Code puro, com o prompt padrão dele.
++        systemPrompt: { type: "preset", preset: "claude_code", ...(lead ? { append: lead.prompt + HARNESS_NOTE } : {}) },
++        // CLAUDE.md e .claude/ do próprio repo continuam valendo, como .kilo/ no Kilo.
++        settingSources: ["project"],
++        stderr: (line) => process.stderr.write(`[claude] ${line}`),
++      },
++    })
++    void this.consume(this.q)
++  }
++
++  private async consume(q: Query) {
++    try {
++      for await (const m of q) this.handle(m)
++    } catch (err) {
++      this.ctx.hub.error(this.ctx.sessionID, err instanceof Error ? err.message : String(err))
++    }
++    if (this.turnOpen) {
++      this.turnOpen = false
++      await finishTurn(this.ctx)
++    }
++  }
++
++  private sessionOf(parentToolUseID: string | null | undefined) {
++    return (parentToolUseID && this.childSession.get(parentToolUseID)) || this.ctx.sessionID
++  }
++
++  private handle(m: SDKMessage) {
++    const { hub } = this.ctx
++    switch (m.type) {
++      case "assistant": {
++        const sessionID = this.sessionOf(m.parent_tool_use_id)
++        const agent = this.sessionAgent.get(sessionID) ?? "membro"
++        hub.message(sessionID, m.uuid, "assistant", agent)
++        const content = (m.message.content ?? []) as any[]
++        content.forEach((block, i) => {
++          const partID = `prt_${m.uuid}_${i}`
++          if (block.type === "text" && block.text) hub.text(sessionID, m.uuid, partID, block.text)
++          else if (block.type === "thinking" && block.thinking) hub.text(sessionID, m.uuid, partID, block.thinking, "reasoning")
++          else if (block.type === "tool_use") this.onToolUse(sessionID, block)
++        })
++        return
++      }
++      case "user": {
++        const content = m.message.content
++        if (!Array.isArray(content)) return
++        for (const block of content as any[]) if (block.type === "tool_result") this.onToolResult(block)
++        return
++      }
++      case "system":
++        if (m.subtype === "api_retry")
++          hub.status(this.ctx.sessionID, "retry", {
++            attempt: m.attempt,
++            message: `${m.error}${m.error_status ? ` (HTTP ${m.error_status})` : ""}`,
++            next: Date.now() + m.retry_delay_ms,
++          })
++        else if (m.subtype === "init") hub.emit("harness.init", { harness: "claude-code", model: m.model, tools: m.tools, agents: m.agents })
++        return
++      case "result":
++        if (m.subtype !== "success" || m.is_error) {
++          const errors = "errors" in m && Array.isArray(m.errors) ? m.errors.join("\n") : ""
++          hub.error(this.ctx.sessionID, errors || ("result" in m ? String(m.result) : m.subtype), m.subtype)
++        }
++        this.turnOpen = false
++        void finishTurn(this.ctx)
++        return
++      default:
++        return
++    }
++  }
++
++  private onToolUse(sessionID: string, block: { id: string; name: string; input: Record<string, any> }) {
++    const { hub } = this.ctx
++    const input = block.input ?? {}
++    this.toolSession.set(block.id, sessionID)
++
++    if (SUBAGENT_TOOLS.has(block.name)) {
++      const child = `${this.ctx.sessionID}_${block.id}`
++      const agent = String(input.subagent_type ?? "general-purpose")
++      this.childSession.set(block.id, child)
++      this.sessionAgent.set(child, agent)
++      const taskInput = { subagent_type: agent, description: input.description ?? "", prompt: input.prompt }
++      this.tools.set(block.id, { sessionID, tool: "task", input: taskInput, title: input.description })
++      hub.tool(sessionID, block.id, "task", "running", taskInput, {
++        metadata: { sessionId: child, parentSessionId: sessionID },
++        title: input.description,
++      })
++      if (input.prompt) hub.userText(child, agent, String(input.prompt))
++      hub.status(child, "busy")
++      return
++    }
++
++    const name = TOOL_NAMES[block.name] ?? block.name.replace(/^mcp__/, "").toLowerCase()
++    const normalized = normalizeInput(input)
++    if (name === "board_post" || name === "board_read")
++      this.boardCalls.push({ tool: name, input: stable(input), sessionID, used: false })
++    this.tools.set(block.id, { sessionID, tool: name, input: normalized, title: input.description })
++    hub.tool(sessionID, block.id, name, "running", normalized, { title: input.description })
++  }
++
++  private onToolResult(block: { tool_use_id: string; is_error?: boolean; content?: unknown }) {
++    const info = this.tools.get(block.tool_use_id)
++    if (!info) return
++    const status = block.is_error ? "error" : "completed"
++    const output = truncate(Array.isArray(block.content) ? block.content.map((c: any) => c.text ?? "").join("\n") : block.content)
++    const child = this.childSession.get(block.tool_use_id)
++    this.ctx.hub.tool(info.sessionID, block.tool_use_id, info.tool, status, info.input, {
++      output,
++      title: info.title,
++      ...(child ? { metadata: { sessionId: child, parentSessionId: info.sessionID } } : {}),
++    })
++    if (child) this.ctx.hub.status(child, "idle")
++  }
++
++  private canUseTool: CanUseTool = async (toolName, input, opts) => {
++    const allow = { behavior: "allow" as const, updatedInput: input }
++    const key = PERMISSION_KEYS[toolName]
++    if (!key) return allow
++    const value = String(input.command ?? input.file_path ?? input.url ?? input.query ?? input.pattern ?? "*")
++    const action = this.ctx.policy.evaluate(key, value)
++    if (action === "allow") return allow
++    if (action === "deny") return { behavior: "deny", message: `negado pela política da squad (${key})` }
++
++    const sessionID = (await waitFor(() => this.toolSession.get(opts.toolUseID), 500)) ?? this.ctx.sessionID
++    const always = alwaysPattern(key, value)
++    const reply = await this.ctx.hub.ask(
++      { sessionID, permission: key, patterns: [value], metadata: { tool: toolName, title: opts.title, ...normalizeInput(input) }, always: [always] },
++      opts.signal,
++    )
++    if (reply === "reject") return { behavior: "deny", message: "recusado pelo humano na UI" }
++    if (reply === "always") this.ctx.policy.allowAlways(key, always)
++    return allow
++  }
++
++  /** Board do Swarm emulado: mesmas tools e mesmo formato de mensagem do Kilo. */
++  private boardServer() {
++    const { hub, sessionID: root } = this.ctx
++    const types = ["INFO", "ASK", "RESULT", "HOLD", "VETO"] as const
++    return createSdkMcpServer({
++      name: "board",
++      version: "1.0.0",
++      tools: [
++        tool(
++          "board_post",
++          "Publica uma mensagem no board compartilhado da squad. to: ALL (todos), main (líder) ou o nome de um agente.",
++          { to: z.string(), type: z.enum(types), body: z.string(), reply_to: z.string().optional() },
++          async (args) => {
++            const from = await this.claimBoardCall("board_post", args)
++            const fromLabel = this.sessionAgent.get(from)
++            const toLabel = args.to === "main" ? this.ctx.agent : args.to
++            const msg = hub.postBoard({ from, fromLabel, to: args.to, toLabel, type: args.type, body: args.body, reply_to: args.reply_to })
++            return { content: [{ type: "text", text: `publicado ${msg.id}` }] }
++          },
++        ),
++        tool("board_read", "Lê as mensagens mais recentes do board da squad.", { limit: z.number().optional() }, async (args) => {
++          await this.claimBoardCall("board_read", args)
++          const board = hub.boardSnapshot(root, { limit: args.limit ?? 50 })
++          const text = board.messages.map((m) => `[${m.id}] ${m.fromLabel ?? m.from} -> ${m.toLabel ?? m.to} ${m.type}: ${m.body}`).join("\n")
++          return { content: [{ type: "text", text: text || "(board vazio)" }] }
++        }),
++      ],
++    })
++  }
++
++  /**
++   * O handler MCP não sabe qual subagente chamou. Casamos pela chamada vista no stream
++   * (mesma tool, mesmo input) que ainda não foi usada; sem par, atribui ao líder.
++   */
++  private async claimBoardCall(tool: string, args: Record<string, unknown>) {
++    const key = stable(args)
++    const call = await waitFor(() => this.boardCalls.find((c) => !c.used && c.tool === tool && c.input === key), 1_000)
++    if (call) call.used = true
++    return call?.sessionID ?? this.ctx.sessionID
++  }
++}
++
++/** Nomes de campo do Claude Code -> os que a UI resume (filePath, command, pattern, url). */
++function normalizeInput(input: Record<string, any>): Record<string, unknown> {
++  const out: Record<string, unknown> = { ...input }
++  if (input.file_path) out.filePath = input.file_path
++  if (input.notebook_path) out.filePath = input.notebook_path
++  // Conteúdo de arquivo não precisa ir para a timeline
++  for (const k of ["content", "old_string", "new_string", "edits"]) if (k in out) out[k] = truncate(out[k], 400)
++  return out
++}
++
++function stable(v: Record<string, unknown>) {
++  return JSON.stringify(Object.keys(v).sort().reduce<Record<string, unknown>>((o, k) => ((o[k] = v[k]), o), {}))
++}
++
++async function waitFor<T>(fn: () => T | undefined, timeoutMs: number): Promise<T | undefined> {
++  const deadline = Date.now() + timeoutMs
++  for (;;) {
++    const v = fn()
++    if (v !== undefined || Date.now() >= deadline) return v
++    await new Promise((r) => setTimeout(r, 25))
++  }
++}
++
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/sandbox/bridge/src/codex.ts squad-orchestrator-harness/sandbox/bridge/src/codex.ts
+--- squad-orchestrator/sandbox/bridge/src/codex.ts	1970-01-01 00:00:00.000000000 +0000
++++ squad-orchestrator-harness/sandbox/bridge/src/codex.ts	2026-09-27 12:16:18.000000000 +0000
+@@ -0,0 +1,157 @@
++// Harness Codex, via @openai/codex-sdk (que roda `codex exec --experimental-json`).
++//
++// O que degrada em relação ao Kilo, e por quê:
++//   - Squad: o Codex exec não tem subagentes. Roda um agente só ("codex"), que recebe o
++//     roteiro do líder adaptado para fazer os papéis da squad em sequência. O grafo mostra um nó.
++//   - Board: não há board; GET .../board responde vazio.
++//   - Permissões: o exec não tem canal de aprovação interativa, então roda com
++//     approvalPolicy "never". O isolamento é o container (mesma decisão do Kilo).
++//
++// Mapeamento de itens do thread:
++//   agent_message -> message (texto)     reasoning -> message (reasoning)
++//   command_execution -> tool "bash"     file_change -> tool "edit"
++//   mcp_tool_call -> tool "<server>.<tool>"   web_search -> tool "websearch"
++//   todo_list -> tool "todowrite"        error / turn.failed -> session.error
++//   turn.completed -> session.diff + idle
++
++import { Codex, type SandboxMode, type Thread, type ThreadEvent, type ThreadItem } from "@openai/codex-sdk"
++import { newID } from "./hub.ts"
++import { finishTurn, truncate, type PromptInput, type Runner, type RunnerContext } from "./runner.ts"
++
++export const CODEX_AGENT = "codex"
++
++const SOLO_NOTE = `
++
++## Notas do ambiente (Codex)
++Aqui não há subagentes nem board. Faça você mesmo, em sequência, os papéis da squad: arquiteto (desenho curto), desenvolvedor (implementação), QA (testes rodando) e revisor (releia o \`git diff\` com rigor). Ignore as instruções sobre \`task\`, \`board_post\` e \`board_read\`; resuma o plano e o resultado na resposta.`
++
++type CodexFactory = () => Pick<Codex, "startThread">
++
++export class CodexRunner implements Runner {
++  private thread?: Thread
++  private queue: PromptInput[] = []
++  private running = false
++  private abortController?: AbortController
++  private turn = 0
++  private messageID?: string
++
++  private ctx: RunnerContext
++  private codexFactory: CodexFactory
++
++  constructor(ctx: RunnerContext, codexFactory?: CodexFactory) {
++    this.ctx = ctx
++    this.codexFactory = codexFactory ?? (() => new Codex({ apiKey: process.env.CODEX_API_KEY || process.env.OPENAI_API_KEY || undefined }))
++  }
++
++  prompt(input: PromptInput) {
++    this.queue.push(input)
++    this.ctx.hub.userText(this.ctx.sessionID, CODEX_AGENT, input.text)
++    if (!this.running) void this.loop()
++  }
++
++  async abort() {
++    this.queue = []
++    this.abortController?.abort()
++  }
++
++  close() {
++    void this.abort()
++  }
++
++  private start(model?: string) {
++    this.thread = this.codexFactory().startThread({
++      model,
++      workingDirectory: this.ctx.repoDir,
++      skipGitRepoCheck: true,
++      approvalPolicy: "never",
++      // O sandbox próprio do Codex (landlock/seccomp) costuma falhar dentro do Docker; o container
++      // é o isolamento, como no Kilo com SANDBOX_NATIVE_ISOLATION=false.
++      sandboxMode: (process.env.CODEX_SANDBOX_MODE as SandboxMode) || "danger-full-access",
++      networkAccessEnabled: true,
++    })
++  }
++
++  private async loop() {
++    const { hub, sessionID } = this.ctx
++    this.running = true
++    hub.status(sessionID, "busy")
++    while (this.queue.length) {
++      const input = this.queue.shift()!
++      const first = !this.thread
++      if (first) this.start(input.model)
++      const lead = this.ctx.squad[this.ctx.agent]
++      const text = first && lead ? `${lead.prompt}${SOLO_NOTE}\n\n## Tarefa\n${input.text}` : input.text
++      this.turn++
++      this.messageID = undefined
++      this.abortController = new AbortController()
++      try {
++        const { events } = await this.thread!.runStreamed(text, { signal: this.abortController.signal })
++        for await (const event of events) this.handle(event)
++      } catch (err) {
++        if (!this.abortController.signal.aborted) hub.error(sessionID, err instanceof Error ? err.message : String(err), "CodexError")
++      }
++    }
++    this.running = false
++    await finishTurn(this.ctx)
++  }
++
++  private handle(event: ThreadEvent) {
++    const { hub, sessionID } = this.ctx
++    switch (event.type) {
++      case "thread.started":
++        return hub.emit("harness.init", { harness: "codex", threadID: event.thread_id })
++      case "item.started":
++      case "item.updated":
++      case "item.completed":
++        return this.onItem(event.item, event.type === "item.completed")
++      case "turn.failed":
++        return hub.error(sessionID, event.error.message, "CodexTurnFailed")
++      case "error":
++        return hub.error(sessionID, event.message, "CodexError")
++      default:
++        return
++    }
++  }
++
++  private onItem(item: ThreadItem, done: boolean) {
++    const { hub, sessionID } = this.ctx
++    // ids de item (item_0, item_1...) recomeçam a cada turno
++    const callID = `t${this.turn}_${item.id}`
++    const ensureMessage = () => {
++      if (!this.messageID) {
++        this.messageID = newID("msg")
++        hub.message(sessionID, this.messageID, "assistant", CODEX_AGENT)
++      }
++      return this.messageID
++    }
++    switch (item.type) {
++      case "agent_message":
++        return hub.text(sessionID, ensureMessage(), `prt_${callID}`, item.text)
++      case "reasoning":
++        return hub.text(sessionID, ensureMessage(), `prt_${callID}`, item.text, "reasoning")
++      case "command_execution": {
++        const status = item.status === "in_progress" ? "running" : item.status === "failed" || (item.exit_code ?? 0) !== 0 ? "error" : "completed"
++        return hub.tool(sessionID, callID, "bash", status, { command: item.command }, { output: truncate(item.aggregated_output), metadata: { exit: item.exit_code } })
++      }
++      case "file_change": {
++        const description = item.changes.map((c) => `${c.kind} ${c.path}`).join(", ")
++        return hub.tool(sessionID, callID, "edit", item.status === "failed" ? "error" : "completed", { filePath: item.changes[0]?.path, description, changes: item.changes }, { title: description })
++      }
++      case "mcp_tool_call": {
++        const status = item.status === "in_progress" ? "running" : item.status === "failed" ? "error" : "completed"
++        return hub.tool(sessionID, callID, `${item.server}.${item.tool}`, status, (item.arguments as Record<string, unknown>) ?? {}, {
++          output: truncate(item.error?.message ?? item.result?.content),
++        })
++      }
++      case "web_search":
++        return hub.tool(sessionID, callID, "websearch", done ? "completed" : "running", { query: item.query }, { title: item.query })
++      case "todo_list": {
++        const doneCount = item.items.filter((i) => i.completed).length
++        const title = `plano ${doneCount}/${item.items.length}: ${item.items.find((i) => !i.completed)?.text ?? "concluído"}`
++        return hub.tool(sessionID, callID, "todowrite", done ? "completed" : "running", { todos: item.items }, { title })
++      }
++      case "error":
++        return hub.error(sessionID, item.message, "CodexItemError")
++    }
++  }
++}
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/sandbox/bridge/src/diff.ts squad-orchestrator-harness/sandbox/bridge/src/diff.ts
+--- squad-orchestrator/sandbox/bridge/src/diff.ts	1970-01-01 00:00:00.000000000 +0000
++++ squad-orchestrator-harness/sandbox/bridge/src/diff.ts	2026-09-27 12:16:18.000000000 +0000
+@@ -0,0 +1,57 @@
++// Diff da sessão calculado pelo git, no mesmo formato que a gaveta de diff da UI lê
++// ({ file, additions, deletions, status, patch }). Base = HEAD de quando a ponte subiu,
++// então commits feitos pelo agente na branch da tarefa também aparecem.
++
++import { execFile } from "node:child_process"
++import { readFile } from "node:fs/promises"
++import { join } from "node:path"
++import { promisify } from "node:util"
++
++const exec = promisify(execFile)
++const MAX_PATCH = 20_000
++
++export interface FileDiff {
++  file: string
++  additions: number
++  deletions: number
++  status: "added" | "modified" | "deleted"
++  patch?: string
++}
++
++export class GitDiff {
++  private base?: string
++  private repoDir: string
++
++  constructor(repoDir: string) {
++    this.repoDir = repoDir
++  }
++
++  private git(args: string[]) {
++    return exec("git", ["-C", this.repoDir, ...args], { maxBuffer: 32 * 1024 * 1024 }).then((r) => r.stdout)
++  }
++
++  async init() {
++    this.base = (await this.git(["rev-parse", "HEAD"]).catch(() => "")).trim() || undefined
++  }
++
++  async compute(): Promise<FileDiff[]> {
++    if (!this.base) await this.init()
++    const base = this.base ?? "HEAD"
++    const files: FileDiff[] = []
++    const numstat = await this.git(["diff", "--numstat", base]).catch(() => "")
++    for (const line of numstat.split("\n").filter(Boolean)) {
++      const [add, del, file] = line.split("\t")
++      if (!file) continue
++      const patch = await this.git(["diff", base, "--", file]).catch(() => "")
++      const status = /^new file mode/m.test(patch) ? "added" : /^deleted file mode/m.test(patch) ? "deleted" : "modified"
++      files.push({ file, additions: Number(add) || 0, deletions: Number(del) || 0, status, patch: patch.slice(0, MAX_PATCH) })
++    }
++    const untracked = await this.git(["ls-files", "--others", "--exclude-standard"]).catch(() => "")
++    for (const file of untracked.split("\n").filter(Boolean)) {
++      const content = await readFile(join(this.repoDir, file), "utf8").catch(() => "")
++      const lines = content.split("\n")
++      files.push({ file, additions: lines.length, deletions: 0, status: "added", patch: lines.map((l) => "+" + l).join("\n").slice(0, MAX_PATCH) })
++    }
++    return files
++  }
++}
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/sandbox/bridge/src/fakes.ts squad-orchestrator-harness/sandbox/bridge/src/fakes.ts
+--- squad-orchestrator/sandbox/bridge/src/fakes.ts	1970-01-01 00:00:00.000000000 +0000
++++ squad-orchestrator-harness/sandbox/bridge/src/fakes.ts	2026-09-27 12:20:23.000000000 +0000
+@@ -0,0 +1,205 @@
++// Roteiros gravados no formato dos SDKs (BRIDGE_FAKE=1). Passam pelos mesmos runners e
++// mapeamentos que os SDKs reais, então servem para demo e para testar a ponte sem LLM.
++// O roteiro do Claude Code espelha o scripts/mock-kilo.ts: squad, board, permissão, VETO.
++
++import type { CanUseTool, McpSdkServerConfigWithInstance, Options, Query, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"
++import type { ThreadEvent, ThreadOptions } from "@openai/codex-sdk"
++import { randomUUID } from "node:crypto"
++import { appendFile } from "node:fs/promises"
++import { join } from "node:path"
++
++const SPEED = Number(process.env.BRIDGE_FAKE_SPEED ?? 1)
++const wait = (ms: number) => new Promise((r) => setTimeout(r, ms * SPEED))
++
++export function fakeClaudeQuery(params: { prompt: string | AsyncIterable<SDKUserMessage>; options?: Options }): Query {
++  const options = params.options ?? {}
++  const cwd = options.cwd ?? process.cwd()
++  const canUseTool = options.canUseTool as CanUseTool
++  const board = (options.mcpServers as Record<string, McpSdkServerConfigWithInstance> | undefined)?.board
++  const out: SDKMessage[] = []
++  let notify: (() => void) | undefined
++  let closed = false
++  let interrupted = false
++  const push = (m: any) => {
++    out.push(m as SDKMessage)
++    notify?.()
++  }
++
++  const session_id = randomUUID()
++  const say = (parent: string | null, text: string) =>
++    push({ type: "assistant", uuid: randomUUID(), session_id, parent_tool_use_id: parent, message: { id: randomUUID(), role: "assistant", content: [{ type: "text", text }] } })
++
++  /** tool_use -> (permissão) -> execução -> tool_result, como o Claude Code faz. */
++  const use = async (parent: string | null, name: string, input: Record<string, unknown>, run?: () => Promise<string>) => {
++    const id = "toolu_" + randomUUID().replaceAll("-", "").slice(0, 16)
++    push({ type: "assistant", uuid: randomUUID(), session_id, parent_tool_use_id: parent, message: { id: randomUUID(), role: "assistant", content: [{ type: "tool_use", id, name, input }] } })
++    await wait(150)
++    const decision = await canUseTool(name, input, { signal: new AbortController().signal, toolUseID: id, requestId: id })
++    let content = "ok"
++    let is_error = false
++    if (decision?.behavior === "deny") {
++      content = decision.message
++      is_error = true
++    } else if (name.startsWith("mcp__board__")) {
++      const tools = (board?.instance as any)?._registeredTools ?? {}
++      const t = tools[name.replace("mcp__board__", "")]
++      const result = await (t?.handler ?? t?.callback)?.(input, {})
++      content = result?.content?.[0]?.text ?? "ok"
++    } else if (run) content = await run()
++    push({ type: "user", session_id, parent_tool_use_id: parent, message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content, is_error }] } })
++    return id
++  }
++
++  const agent = async (subagent_type: string, description: string, body: (self: string) => Promise<void>) => {
++    const id = "toolu_" + randomUUID().replaceAll("-", "").slice(0, 16)
++    const input = { subagent_type, description, prompt: `${description}. Siga o desenho no board.` }
++    push({ type: "assistant", uuid: randomUUID(), session_id, parent_tool_use_id: null, message: { id: randomUUID(), role: "assistant", content: [{ type: "tool_use", id, name: "Agent", input }] } })
++    await canUseTool("Agent", input, { signal: new AbortController().signal, toolUseID: id, requestId: id })
++    await wait(300)
++    await body(id)
++    push({ type: "user", session_id, parent_tool_use_id: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: `${subagent_type} concluiu` }] } })
++  }
++
++  const post = (parent: string | null, to: string, type: string, body: string) => use(parent, "mcp__board__board_post", { to, type, body })
++  const result = () => push({ type: "result", subtype: "success", is_error: false, result: "ok", session_id, uuid: randomUUID(), duration_ms: 0, duration_api_ms: 0, num_turns: 1 })
++
++  async function squadTurn() {
++    push({ type: "system", subtype: "init", model: options.model ?? "claude-fake", tools: ["Agent", "Bash", "Edit", "Read", "mcp__board__board_post"], agents: Object.keys(options.agents ?? {}), session_id, uuid: randomUUID() })
++    await wait(300)
++    say(null, "Explorei o repo. Plano: architect desenha, developer implementa, qa testa e reviewer revisa o diff.")
++    await post(null, "ALL", "INFO", "Plano: 1) desenho 2) implementação 3) testes 4) revisão. Postem ASK se travarem.")
++    await agent("architect", "Desenhar a mudança", async (self) => {
++      say(self, "Li o README e a estrutura. Proposta: uma seção nova, sem mexer no código.")
++      await use(self, "Read", { file_path: "README.md" }, async () => "conteúdo")
++      await post(self, "main", "RESULT", "Adicionar SQUAD_DEMO.md com o passo a passo; README aponta para ele.")
++    })
++    await agent("developer", "Implementar a mudança", async (self) => {
++      say(self, "Implementando a partir do desenho do architect.")
++      await use(self, "Write", { file_path: join(cwd, "SQUAD_DEMO.md"), content: "# Squad demo\n" }, async () => {
++        await appendFile(join(cwd, "SQUAD_DEMO.md"), "# Squad demo\n\nFeito pela squad (Claude Code, roteiro fake).\n")
++        return "arquivo escrito"
++      })
++      await use(self, "Bash", { command: "npm install --save-dev markdownlint-cli", description: "instalar o lint de markdown" }, async () => "added 1 package")
++      await post(self, "main", "RESULT", "SQUAD_DEMO.md criado.")
++    })
++    await agent("reviewer", "Revisar o diff", async (self) => {
++      await use(self, "Bash", { command: "git diff" }, async () => "+# Squad demo")
++      await post(self, "main", "VETO", "SQUAD_DEMO.md:1 falta dizer como rodar. Corrija antes do commit.")
++    })
++    await agent("developer", "Completar o como rodar", async (self) => {
++      await use(self, "Edit", { file_path: join(cwd, "SQUAD_DEMO.md"), old_string: "", new_string: "## Como rodar" }, async () => {
++        await appendFile(join(cwd, "SQUAD_DEMO.md"), "\n## Como rodar\n\n`npm test`\n")
++        return "editado"
++      })
++      await post(self, "main", "RESULT", "Seção 'Como rodar' adicionada.")
++    })
++    await agent("reviewer", "Revisar a correção", async (self) => {
++      await use(self, "Bash", { command: "git diff" }, async () => "+## Como rodar")
++      await post(self, "main", "RESULT", "Corrigido pelo developer. Aprovado.")
++    })
++    say(null, "Pronto. SQUAD_DEMO.md criado, revisão aprovada depois da correção.")
++    result()
++  }
++
++  void (async () => {
++    let first = true
++    for await (const msg of params.prompt as AsyncIterable<SDKUserMessage>) {
++      if (closed) break
++      interrupted = false
++      if (first) await squadTurn()
++      else {
++        say(null, `Entendido: "${String(msg.message.content).slice(0, 80)}".`)
++        result()
++      }
++      first = false
++    }
++    closed = true
++    notify?.()
++  })()
++
++  const iterator = {
++    async next() {
++      for (;;) {
++        if (out.length) return { value: out.shift()!, done: false }
++        if (closed) return { value: undefined, done: true }
++        await new Promise<void>((r) => (notify = r))
++      }
++    },
++    async return() {
++      closed = true
++      return { value: undefined, done: true }
++    },
++    async throw(e) {
++      throw e
++    },
++    [Symbol.asyncIterator]() {
++      return this
++    },
++  } as AsyncGenerator<SDKMessage, void>
++  return Object.assign(iterator, {
++    interrupt: async () => {
++      interrupted = true
++      return undefined
++    },
++    setModel: async () => {},
++    close: () => {
++      closed = true
++      notify?.()
++    },
++    get interrupted() {
++      return interrupted
++    },
++  }) as unknown as Query
++}
++
++export function fakeCodex() {
++  return {
++    startThread(options: ThreadOptions = {}) {
++      const cwd = options.workingDirectory ?? process.cwd()
++      let turn = 0
++      return {
++        id: "thr_fake",
++        async runStreamed(input: unknown, opts: { signal?: AbortSignal } = {}) {
++          const current = ++turn
++          async function* events(): AsyncGenerator<ThreadEvent> {
++            if (current === 1) yield { type: "thread.started", thread_id: "thr_fake" }
++            yield { type: "turn.started" }
++            await wait(300)
++            if (current > 1) {
++              yield { type: "item.completed", item: { id: "item_0", type: "agent_message", text: `Entendido: "${String(input).slice(0, 80)}".` } }
++              yield { type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0 } }
++              return
++            }
++            yield { type: "item.completed", item: { id: "item_0", type: "reasoning", text: "Vou ler o repo, desenhar, implementar, testar e revisar." } }
++            const todos = [
++              { text: "Desenhar a mudança", completed: false },
++              { text: "Implementar", completed: false },
++              { text: "Testar", completed: false },
++              { text: "Revisar o diff", completed: false },
++            ]
++            yield { type: "item.started", item: { id: "item_1", type: "todo_list", items: todos } }
++            yield { type: "item.started", item: { id: "item_2", type: "command_execution", command: "ls -la", aggregated_output: "", status: "in_progress" } }
++            await wait(400)
++            yield { type: "item.completed", item: { id: "item_2", type: "command_execution", command: "ls -la", aggregated_output: "README.md\n", exit_code: 0, status: "completed" } }
++            todos[0]!.completed = true
++            yield { type: "item.updated", item: { id: "item_1", type: "todo_list", items: todos } }
++            if (opts.signal?.aborted) return
++            await appendFile(join(cwd, "SQUAD_DEMO.md"), "# Squad demo\n\nFeito pelo Codex (roteiro fake).\n")
++            yield { type: "item.completed", item: { id: "item_3", type: "file_change", changes: [{ path: "SQUAD_DEMO.md", kind: "add" }], status: "completed" } }
++            todos[1]!.completed = true
++            yield { type: "item.updated", item: { id: "item_1", type: "todo_list", items: todos } }
++            yield { type: "item.started", item: { id: "item_4", type: "command_execution", command: "npm test", aggregated_output: "", status: "in_progress" } }
++            await wait(500)
++            yield { type: "item.completed", item: { id: "item_4", type: "command_execution", command: "npm test", aggregated_output: "42 passing", exit_code: 0, status: "completed" } }
++            todos[2]!.completed = true
++            todos[3]!.completed = true
++            yield { type: "item.completed", item: { id: "item_1", type: "todo_list", items: todos } }
++            yield { type: "item.completed", item: { id: "item_5", type: "agent_message", text: "Pronto. SQUAD_DEMO.md criado, testes passando e diff revisado." } }
++            yield { type: "turn.completed", usage: { input_tokens: 1, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0 } }
++          }
++          return { events: events() }
++        },
++      }
++    },
++  } as any
++}
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/sandbox/bridge/src/hub.ts squad-orchestrator-harness/sandbox/bridge/src/hub.ts
+--- squad-orchestrator/sandbox/bridge/src/hub.ts	1970-01-01 00:00:00.000000000 +0000
++++ squad-orchestrator-harness/sandbox/bridge/src/hub.ts	2026-09-27 12:16:06.000000000 +0000
+@@ -0,0 +1,151 @@
++// Barramento de eventos da ponte. Tudo o que os runners (Claude Code, Codex) produzem
++// sai daqui no mesmo formato do `GET /event` do kilo serve, para que o relay do
++// orquestrador e a UI não precisem saber qual harness está rodando.
++
++import type { ServerResponse } from "node:http"
++import { randomBytes } from "node:crypto"
++
++export type PermissionReply = "once" | "always" | "reject"
++
++export interface PendingPermission {
++  id: string
++  sessionID: string
++  permission: string
++  patterns: string[]
++  metadata: Record<string, unknown>
++  always: string[]
++}
++
++export interface BoardMessage {
++  id: string
++  timestamp: number
++  from: string
++  to: string
++  fromLabel?: string
++  toLabel?: string
++  type: "INFO" | "ASK" | "RESULT" | "HOLD" | "VETO"
++  body: string
++  reply_to?: string
++}
++
++export const newID = (prefix: string) => `${prefix}_${randomBytes(8).toString("hex")}`
++
++export class Hub {
++  readonly clients = new Set<ServerResponse>()
++  private seq = 0
++  private pending = new Map<string, { request: PendingPermission; resolve: (r: PermissionReply) => void }>()
++  readonly sessionStatus: Record<string, { type: string }> = {}
++
++  // Board do Swarm emulado (só o Claude Code usa, via MCP in-process). Mesmo formato do Kilo.
++  board: BoardMessage[] = []
++  boardRevision = 0
++
++  emit(type: string, properties: Record<string, unknown>) {
++    const data = JSON.stringify({ id: `evt_${++this.seq}`, type, properties })
++    for (const c of this.clients) c.write(`data: ${data}\n\n`)
++  }
++
++  status(sessionID: string, type: "busy" | "idle" | "retry", extra: Record<string, unknown> = {}) {
++    this.sessionStatus[sessionID] = { type }
++    this.emit("session.status", { sessionID, status: { type, ...extra } })
++    if (type === "idle") this.emit("session.idle", { sessionID })
++  }
++
++  message(sessionID: string, id: string, role: "user" | "assistant", agent: string) {
++    this.emit("message.updated", { sessionID, info: { id, sessionID, role, agent } })
++  }
++
++  /** Parte de texto (ou reasoning) completa; a UI substitui o texto se o id já existir. */
++  text(sessionID: string, messageID: string, partID: string, text: string, type: "text" | "reasoning" = "text") {
++    this.emit("message.part.updated", { sessionID, part: { id: partID, messageID, sessionID, type, text }, time: Date.now() })
++  }
++
++  /** Mensagem de usuário numa sessão (prompt da tarefa, follow-up ou instrução recebida por um membro). */
++  userText(sessionID: string, agent: string, text: string) {
++    const messageID = newID("msg")
++    this.message(sessionID, messageID, "user", agent)
++    this.text(sessionID, messageID, newID("prt"), text)
++  }
++
++  tool(
++    sessionID: string,
++    callID: string,
++    tool: string,
++    status: "pending" | "running" | "completed" | "error",
++    input: Record<string, unknown>,
++    extra: { output?: string; metadata?: Record<string, unknown>; title?: string } = {},
++  ) {
++    this.emit("message.part.updated", {
++      sessionID,
++      part: {
++        id: `prt_${callID}`,
++        sessionID,
++        type: "tool",
++        tool,
++        callID,
++        state: { status, input, output: extra.output, metadata: extra.metadata, title: extra.title },
++      },
++      time: Date.now(),
++    })
++  }
++
++  error(sessionID: string, message: string, name = "HarnessError") {
++    this.emit("session.error", { sessionID, error: { name, data: { message } } })
++  }
++
++  /** Abre um pedido de permissão e espera a UI responder (POST /permission/:id/reply). */
++  ask(request: Omit<PendingPermission, "id">, signal?: AbortSignal): Promise<PermissionReply> {
++    const id = newID("per")
++    const full = { id, ...request }
++    return new Promise((resolve) => {
++      const done = (reply: PermissionReply) => {
++        if (!this.pending.delete(id)) return
++        this.emit("permission.replied", { sessionID: full.sessionID, requestID: id, reply })
++        resolve(reply)
++      }
++      this.pending.set(id, { request: full, resolve: done })
++      signal?.addEventListener("abort", () => done("reject"), { once: true })
++      this.emit("permission.asked", full)
++    })
++  }
++
++  reply(id: string, reply: PermissionReply): boolean {
++    const entry = this.pending.get(id)
++    if (!entry) return false
++    entry.resolve(reply)
++    return true
++  }
++
++  pendingPermissions(): PendingPermission[] {
++    return [...this.pending.values()].map((p) => p.request)
++  }
++
++  rejectAll() {
++    for (const p of [...this.pending.values()]) p.resolve("reject")
++  }
++
++  postBoard(msg: Omit<BoardMessage, "id" | "timestamp">): BoardMessage {
++    const full = { id: `brd_${this.board.length + 1}`, timestamp: Date.now(), ...msg }
++    this.board.push(full)
++    return full
++  }
++
++  boardSnapshot(ownerSessionID: string, opts: { before?: string; limit?: number } = {}) {
++    let messages = this.board
++    if (opts.before) {
++      const idx = messages.findIndex((m) => m.id === opts.before)
++      if (idx >= 0) messages = messages.slice(0, idx)
++    }
++    const limit = opts.limit ?? 50
++    const page = messages.slice(-limit)
++    return { ownerSessionID, revision: this.boardRevision, messages: page, cursor: page[0]?.id, hasMore: messages.length > page.length }
++  }
++
++  resetBoard(ownerSessionID: string, revision: number) {
++    if (revision === this.boardRevision) {
++      this.board = []
++      this.boardRevision++
++    }
++    return this.boardSnapshot(ownerSessionID)
++  }
++}
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/sandbox/bridge/src/runner.ts squad-orchestrator-harness/sandbox/bridge/src/runner.ts
+--- squad-orchestrator/sandbox/bridge/src/runner.ts	1970-01-01 00:00:00.000000000 +0000
++++ squad-orchestrator-harness/sandbox/bridge/src/runner.ts	2026-09-27 12:16:06.000000000 +0000
+@@ -0,0 +1,68 @@
++// Contrato comum dos harnesses dentro da ponte. Um runner por sessão raiz.
++
++import type { GitDiff } from "./diff.ts"
++import type { Hub } from "./hub.ts"
++import type { Policy, SquadAgent } from "./squad.ts"
++
++export interface RunnerContext {
++  hub: Hub
++  sessionID: string // sessão raiz (dona do board)
++  agent: string // agente primário pedido pela tarefa (ex.: squad-lead)
++  repoDir: string
++  squad: Record<string, SquadAgent>
++  policy: Policy
++  diff: GitDiff
++}
++
++export interface PromptInput {
++  text: string
++  agent?: string
++  model?: string // modelID puro (o providerID do formato do Kilo é descartado)
++}
++
++export interface Runner {
++  prompt(input: PromptInput): void
++  abort(): Promise<void>
++  close(): void
++}
++
++/** Fim de turno: marca idle, publica o diff e libera quem espera. Igual ao que o Kilo emite. */
++export async function finishTurn(ctx: RunnerContext) {
++  const diff = await ctx.diff.compute().catch(() => [])
++  ctx.hub.emit("session.diff", { sessionID: ctx.sessionID, diff })
++  ctx.hub.status(ctx.sessionID, "idle")
++}
++
++/** Fila assíncrona simples para o modo de entrada em streaming do Agent SDK. */
++export class AsyncQueue<T> implements AsyncIterable<T> {
++  private items: T[] = []
++  private waiters: ((r: IteratorResult<T>) => void)[] = []
++  private closed = false
++
++  push(item: T) {
++    const w = this.waiters.shift()
++    if (w) w({ value: item, done: false })
++    else this.items.push(item)
++  }
++
++  close() {
++    this.closed = true
++    for (const w of this.waiters.splice(0)) w({ value: undefined as never, done: true })
++  }
++
++  [Symbol.asyncIterator](): AsyncIterator<T> {
++    return {
++      next: () => {
++        if (this.items.length) return Promise.resolve({ value: this.items.shift()!, done: false })
++        if (this.closed) return Promise.resolve({ value: undefined as never, done: true })
++        return new Promise((resolve) => this.waiters.push(resolve))
++      },
++    }
++  }
++}
++
++export function truncate(text: unknown, max = 4_000): string | undefined {
++  if (text === undefined || text === null) return undefined
++  const s = typeof text === "string" ? text : JSON.stringify(text)
++  return s.length > max ? s.slice(0, max) + "\n…" : s
++}
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/sandbox/bridge/src/server.ts squad-orchestrator-harness/sandbox/bridge/src/server.ts
+--- squad-orchestrator/sandbox/bridge/src/server.ts	1970-01-01 00:00:00.000000000 +0000
++++ squad-orchestrator-harness/sandbox/bridge/src/server.ts	2026-09-27 12:16:06.000000000 +0000
+@@ -0,0 +1,150 @@
++// Ponte de harness: roda dentro da sandbox no lugar do `kilo serve` quando a tarefa pede
++// Claude Code ou Codex, e responde o mesmo subconjunto HTTP/SSE que o orquestrador usa
++// (ver src/kilo.ts do orquestrador). Assim o orquestrador, o relay e a UI não mudam de
++// protocolo; só a tabela de capacidades por harness diz o que degrada.
++//
++//   GET  /global/health                       POST /session
++//   GET  /event (SSE)                         POST /session/:id/prompt_async
++//   GET  /session/status                      POST /session/:id/abort
++//   GET  /session/:id/diff                    GET  /permission
++//   POST /permission/:id/reply                GET  /kilocode/session/:id/board
++//   POST /kilocode/session/:id/board/reset
++//
++// Env: HARNESS=claude-code|codex, KILO_SERVER_PASSWORD, REPO_DIR, SQUAD_DIR, PORT (4096),
++// BRIDGE_FAKE=1 troca os SDKs por roteiros gravados (demo e testes sem LLM).
++
++import { createServer, type IncomingMessage, type ServerResponse } from "node:http"
++import { ClaudeRunner } from "./claude.ts"
++import { CodexRunner } from "./codex.ts"
++import { GitDiff } from "./diff.ts"
++import { Hub, newID, type PermissionReply } from "./hub.ts"
++import type { Runner, RunnerContext } from "./runner.ts"
++import { Policy, loadSquad } from "./squad.ts"
++
++const HARNESS = process.env.HARNESS ?? "claude-code"
++const PORT = Number(process.env.PORT ?? 4096)
++const PASSWORD = process.env.KILO_SERVER_PASSWORD ?? ""
++const USERNAME = process.env.KILO_SERVER_USERNAME ?? "kilo"
++const REPO_DIR = process.env.REPO_DIR ?? process.cwd()
++const SQUAD_DIR = process.env.SQUAD_DIR ?? process.env.KILO_CONFIG_DIR ?? "/opt/squad"
++const VERSION = `bridge-0.1.0 (${HARNESS})`
++
++if (HARNESS !== "claude-code" && HARNESS !== "codex") {
++  console.error(`[bridge] HARNESS inválido: ${HARNESS} (use claude-code ou codex)`)
++  process.exit(1)
++}
++
++const hub = new Hub()
++const squad = loadSquad(SQUAD_DIR)
++const policy = Policy.fromKiloConfig(SQUAD_DIR)
++const diff = new GitDiff(REPO_DIR)
++await diff.init()
++const sessions = new Map<string, Runner>()
++const fakes = process.env.BRIDGE_FAKE === "1" ? await import("./fakes.ts") : undefined
++
++function createRunner(ctx: RunnerContext): Runner {
++  if (HARNESS === "codex") return new CodexRunner(ctx, fakes?.fakeCodex)
++  return new ClaudeRunner(ctx, fakes?.fakeClaudeQuery)
++}
++
++const json = (res: ServerResponse, status: number, body: unknown) =>
++  res.writeHead(status, { "Content-Type": "application/json" }).end(body === undefined ? "" : JSON.stringify(body))
++
++async function readJson(req: IncomingMessage): Promise<Record<string, any>> {
++  const chunks: Buffer[] = []
++  for await (const c of req) chunks.push(c)
++  if (!chunks.length) return {}
++  return JSON.parse(Buffer.concat(chunks).toString("utf8"))
++}
++
++/** Aceita o formato do Kilo ({ providerID, modelID }) ou uma string. */
++function modelOf(model: unknown): string | undefined {
++  if (!model) return undefined
++  if (typeof model === "string") return model.includes("/") ? model.slice(model.indexOf("/") + 1) : model
++  const m = model as { modelID?: string }
++  return m.modelID || undefined
++}
++
++const expectedAuth = "Basic " + Buffer.from(`${USERNAME}:${PASSWORD}`).toString("base64")
++
++const server = createServer(async (req, res) => {
++  const url = new URL(req.url ?? "/", "http://bridge")
++  const p = url.pathname
++  if (PASSWORD && req.headers.authorization !== expectedAuth) return json(res, 401, { error: "unauthorized" })
++  let m: RegExpMatchArray | null
++  try {
++    if (p === "/global/health") return json(res, 200, { healthy: true, version: VERSION })
++
++    if (p === "/event") {
++      res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" })
++      res.write(`data: ${JSON.stringify({ type: "server.connected", properties: {} })}\n\n`)
++      hub.clients.add(res)
++      const ping = setInterval(() => res.write(`data: ${JSON.stringify({ type: "server.heartbeat", properties: {} })}\n\n`), 10_000)
++      req.on("close", () => {
++        clearInterval(ping)
++        hub.clients.delete(res)
++      })
++      return
++    }
++
++    if (p === "/session" && req.method === "POST") {
++      const body = await readJson(req)
++      const id = newID("ses")
++      const agent = String(body.agent ?? "squad-lead")
++      sessions.set(id, createRunner({ hub, sessionID: id, agent, repoDir: REPO_DIR, squad, policy, diff }))
++      hub.emit("session.created", { sessionID: id, info: { id, title: body.title, agent } })
++      return json(res, 200, { id, title: body.title, agent })
++    }
++
++    if (p === "/session/status") return json(res, 200, hub.sessionStatus)
++
++    if ((m = p.match(/^\/session\/([^/]+)\/prompt_async$/)) && req.method === "POST") {
++      const runner = sessions.get(m[1]!)
++      if (!runner) return json(res, 404, { error: "sessão não encontrada" })
++      const body = await readJson(req)
++      const text = (body.parts ?? []).map((part: any) => part.text ?? "").join("\n").trim()
++      if (!text) return json(res, 400, { error: "prompt vazio" })
++      runner.prompt({ text, agent: body.agent, model: modelOf(body.model) })
++      return res.writeHead(204).end()
++    }
++
++    if ((m = p.match(/^\/session\/([^/]+)\/abort$/)) && req.method === "POST") {
++      await sessions.get(m[1]!)?.abort()
++      return json(res, 200, true)
++    }
++
++    if ((m = p.match(/^\/session\/([^/]+)\/diff$/))) return json(res, 200, await diff.compute())
++
++    if (p === "/permission") return json(res, 200, hub.pendingPermissions())
++
++    if ((m = p.match(/^\/permission\/([^/]+)\/reply$/)) && req.method === "POST") {
++      const body = await readJson(req)
++      const reply = String(body.reply) as PermissionReply
++      if (!["once", "always", "reject"].includes(reply)) return json(res, 400, { error: "reply inválido" })
++      return hub.reply(m[1]!, reply) ? json(res, 200, true) : json(res, 404, { error: "pedido não encontrado" })
++    }
++
++    if ((m = p.match(/^\/kilocode\/session\/([^/]+)\/board$/))) {
++      const limit = url.searchParams.get("limit")
++      return json(res, 200, hub.boardSnapshot(m[1]!, { before: url.searchParams.get("before") ?? undefined, limit: limit ? Number(limit) : undefined }))
++    }
++
++    if ((m = p.match(/^\/kilocode\/session\/([^/]+)\/board\/reset$/)) && req.method === "POST") {
++      const body = await readJson(req)
++      return json(res, 200, hub.resetBoard(m[1]!, Number(body.revision ?? 0)))
++    }
++
++    json(res, 404, { error: `bridge: ${req.method} ${p}` })
++  } catch (err) {
++    console.error("[bridge]", err)
++    if (!res.headersSent) json(res, 500, { error: err instanceof Error ? err.message : String(err) })
++  }
++})
++
++server.listen(PORT, "0.0.0.0", () => console.log(`[bridge] ${VERSION} em :${PORT}, repo ${REPO_DIR}, squad ${Object.keys(squad).join(", ") || "(vazia)"}`))
++
++for (const signal of ["SIGINT", "SIGTERM"] as const)
++  process.on(signal, () => {
++    for (const r of sessions.values()) r.close()
++    process.exit(0)
++  })
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/sandbox/bridge/src/squad.ts squad-orchestrator-harness/sandbox/bridge/src/squad.ts
+--- squad-orchestrator/sandbox/bridge/src/squad.ts	1970-01-01 00:00:00.000000000 +0000
++++ squad-orchestrator-harness/sandbox/bridge/src/squad.ts	2026-09-27 12:16:06.000000000 +0000
+@@ -0,0 +1,96 @@
++// Lê a squad do Kilo (sandbox/squad: kilo.jsonc + agents/*.md) para reaproveitar os mesmos
++// agentes e a mesma política de permissões nos outros harnesses. A squad continua tendo uma
++// fonte só; aqui só adaptamos nomes de tools.
++
++import { readFileSync, readdirSync } from "node:fs"
++import { join } from "node:path"
++
++export interface SquadAgent {
++  name: string
++  description: string
++  mode: "primary" | "subagent" | "all"
++  readOnly: boolean // permission.edit: deny no frontmatter
++  prompt: string
++}
++
++export type Action = "allow" | "ask" | "deny"
++type Rule = Action | Record<string, Action>
++
++export function loadSquad(dir: string): Record<string, SquadAgent> {
++  const agents: Record<string, SquadAgent> = {}
++  let files: string[] = []
++  try {
++    files = readdirSync(join(dir, "agents")).filter((f) => f.endsWith(".md"))
++  } catch {
++    return agents
++  }
++  for (const file of files) {
++    const raw = readFileSync(join(dir, "agents", file), "utf8")
++    const match = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(raw)
++    const front = match?.[1] ?? ""
++    const name = file.replace(/\.md$/, "")
++    agents[name] = {
++      name,
++      description: /^description:\s*(.+)$/m.exec(front)?.[1]?.trim() ?? name,
++      mode: (/^mode:\s*(\w+)/m.exec(front)?.[1] as SquadAgent["mode"]) ?? "all",
++      readOnly: /^\s+edit:\s*deny/m.test(front),
++      prompt: (match?.[2] ?? raw).trim(),
++    }
++  }
++  return agents
++}
++
++/**
++ * Política de permissões no formato do `permission` do kilo.jsonc. Padrões com `*`,
++ * e a última regra que casa vence (o `"*": "ask"` vem primeiro, as exceções depois).
++ */
++export class Policy {
++  private rules: Record<string, Rule>
++  private always: { key: string; pattern: string }[] = []
++
++  constructor(rules: Record<string, Rule>) {
++    this.rules = rules
++  }
++
++  static fromKiloConfig(dir: string): Policy {
++    try {
++      const text = readFileSync(join(dir, "kilo.jsonc"), "utf8")
++        .split("\n")
++        .filter((l) => !/^\s*\/\//.test(l))
++        .join("\n")
++      return new Policy(JSON.parse(text).permission ?? {})
++    } catch {
++      return new Policy({})
++    }
++  }
++
++  evaluate(key: string, value: string): Action {
++    if (this.always.some((a) => a.key === key && wildcard(a.pattern, value))) return "allow"
++    const rule = this.rules[key]
++    if (rule === undefined) return "ask"
++    if (typeof rule === "string") return rule
++    let result: Action = "ask"
++    for (const [pattern, action] of Object.entries(rule)) if (wildcard(pattern, value)) result = action
++    return result
++  }
++
++  /** "Sempre permitir" da UI: vale até a sandbox morrer. */
++  allowAlways(key: string, pattern: string) {
++    this.always.push({ key, pattern })
++  }
++}
++
++function wildcard(pattern: string, value: string) {
++  const re = new RegExp("^" + pattern.split("*").map(escape).join(".*") + "$", "s")
++  return re.test(value)
++}
++
++function escape(s: string) {
++  return s.replace(/[.+?^${}()|[\]\\]/g, "\\$&")
++}
++
++/** Padrão sugerido para "Sempre": o comando sem argumentos (igual ao Kilo). */
++export function alwaysPattern(key: string, value: string) {
++  if (key === "bash") return (value.trim().split(/\s+/)[0] ?? value) + " *"
++  return "*"
++}
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/sandbox/bridge/tsconfig.json squad-orchestrator-harness/sandbox/bridge/tsconfig.json
+--- squad-orchestrator/sandbox/bridge/tsconfig.json	1970-01-01 00:00:00.000000000 +0000
++++ squad-orchestrator-harness/sandbox/bridge/tsconfig.json	2026-09-27 12:16:06.000000000 +0000
+@@ -0,0 +1,14 @@
++{
++  "compilerOptions": {
++    "target": "ES2023",
++    "module": "NodeNext",
++    "moduleResolution": "NodeNext",
++    "strict": true,
++    "noEmit": true,
++    "skipLibCheck": true,
++    "allowImportingTsExtensions": true,
++    "erasableSyntaxOnly": true,
++    "verbatimModuleSyntax": true
++  },
++  "include": ["src"]
++}
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/sandbox/entrypoint.sh squad-orchestrator-harness/sandbox/entrypoint.sh
+--- squad-orchestrator/sandbox/entrypoint.sh	2026-09-26 14:45:40.754407000 +0000
++++ squad-orchestrator-harness/sandbox/entrypoint.sh	2026-09-27 12:22:41.310565000 +0000
+@@ -1,5 +1,6 @@
+ #!/usr/bin/env bash
+-# Clona o repo da tarefa e sobe o kilo serve. O health (/global/health) só responde
++# Clona o repo da tarefa e sobe o harness: `kilo serve`, ou a ponte (sandbox/bridge) para
++# Claude Code e Codex, que responde o mesmo protocolo. O health (/global/health) só responde
+ # depois do clone, então o orquestrador usa o health como "sandbox pronta".
+ set -euo pipefail
+ 
+@@ -28,5 +29,17 @@
+ cd "${REPO_DIR}"
+ git checkout -B "squad/${HOSTNAME}" >/dev/null
+ 
+-echo "[sandbox] subindo kilo serve"
+-exec kilo serve --port 4096 --hostname 0.0.0.0
++case "${HARNESS:-kilo}" in
++  kilo)
++    echo "[sandbox] subindo kilo serve"
++    exec kilo serve --port 4096 --hostname 0.0.0.0
++    ;;
++  claude-code | codex)
++    echo "[sandbox] subindo a ponte (${HARNESS})"
++    exec env REPO_DIR="${REPO_DIR}" PORT=4096 node /opt/bridge/src/server.ts
++    ;;
++  *)
++    echo "[sandbox] HARNESS desconhecido: ${HARNESS}" >&2
++    exit 1
++    ;;
++esac
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/scripts/smoke.ts squad-orchestrator-harness/scripts/smoke.ts
+--- squad-orchestrator/scripts/smoke.ts	2026-09-26 13:52:58.645697000 +0000
++++ squad-orchestrator-harness/scripts/smoke.ts	2026-09-27 12:17:32.000000000 +0000
+@@ -1,6 +1,7 @@
+ // Smoke test ponta a ponta contra o orquestrador já rodando (driver external + mock, ou docker real).
+ // Cria uma tarefa, segue o SSE, aprova a primeira permissão e espera a sessão ficar idle.
+ // Uso: ORCH_URL=http://127.0.0.1:8080 API_TOKEN=... REPO_URL=https://github.com/octocat/Hello-World npx tsx scripts/smoke.ts
++// HARNESS=claude-code|codex escolhe o harness (padrão: o do orquestrador).
+ 
+ import { parseSse } from "../src/kilo.js"
+ 
+@@ -16,10 +17,11 @@
+     repoUrl: process.env.REPO_URL ?? "https://github.com/octocat/Hello-World",
+     branch: process.env.REPO_BRANCH ?? "master",
+     prompt: process.env.PROMPT ?? "Adicione uma seção 'Como rodar' ao README",
++    harness: process.env.HARNESS || undefined,
+   }),
+ })
+ const task = await created.json()
+-console.log("POST /tasks ->", created.status, task.id, task.status)
++console.log("POST /tasks ->", created.status, task.id, task.status, task.harness ?? "", task.error ?? "")
+ if (created.status !== 202) process.exit(1)
+ 
+ const seen = new Set<string>()
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/src/config.ts squad-orchestrator-harness/src/config.ts
+--- squad-orchestrator/src/config.ts	2026-09-26 14:49:44.667491000 +0000
++++ squad-orchestrator-harness/src/config.ts	2026-09-27 12:17:08.000000000 +0000
+@@ -1,5 +1,7 @@
+ // Configuração via variáveis de ambiente (ver .env.example).
+ 
++import { HARNESSES, isHarness, type Harness } from "./harness.js"
++
+ export interface Config {
+   port: number
+   apiToken: string
+@@ -13,13 +15,21 @@
+   kiloExternalUrl: string
+   kiloExternalPassword: string
+   kiloExternalDirectory: string
++  /** Driver external: URL por harness (a ponte da sandbox/bridge ou o kilo serve). */
++  externalUrls: Record<Harness, string>
++  harnesses: Harness[]
++  defaultHarness: Harness
+   squadLeadAgent: string
+-  defaultModel?: string
++  /** Modelo padrão por harness (DEFAULT_MODEL é o do Kilo, no formato provider/model). */
++  defaultModels: Partial<Record<Harness, string>>
+   idleTtlMs: number
+ }
+ 
+ export function loadConfig(env = process.env): Config {
+   const apiToken = env.API_TOKEN ?? ""
++  const kiloExternalUrl = env.KILO_EXTERNAL_URL ?? "http://127.0.0.1:4096"
++  const harnesses = (env.HARNESSES ?? HARNESSES.join(",")).split(",").map((s) => s.trim()).filter(isHarness)
++  const defaultHarness = isHarness(env.DEFAULT_HARNESS) ? env.DEFAULT_HARNESS : (harnesses[0] ?? "kilo")
+   if (!apiToken) console.warn("[config] API_TOKEN vazio: a API está sem autenticação (só para dev)")
+   return {
+     port: Number(env.PORT ?? 8080),
+@@ -34,11 +44,22 @@
+       .map((s) => s.trim())
+       .filter(Boolean),
+     sandboxNativeIsolation: env.SANDBOX_NATIVE_ISOLATION === "true",
+-    kiloExternalUrl: env.KILO_EXTERNAL_URL ?? "http://127.0.0.1:4096",
++    kiloExternalUrl,
+     kiloExternalPassword: env.KILO_EXTERNAL_PASSWORD ?? "",
+     kiloExternalDirectory: env.KILO_EXTERNAL_DIRECTORY ?? "",
++    externalUrls: {
++      kilo: kiloExternalUrl,
++      "claude-code": env.EXTERNAL_URL_CLAUDE_CODE || kiloExternalUrl,
++      codex: env.EXTERNAL_URL_CODEX || kiloExternalUrl,
++    },
++    harnesses: harnesses.length ? harnesses : ["kilo"],
++    defaultHarness,
+     squadLeadAgent: env.SQUAD_LEAD_AGENT ?? "squad-lead",
+-    defaultModel: env.DEFAULT_MODEL || undefined,
++    defaultModels: {
++      kilo: env.DEFAULT_MODEL || undefined,
++      "claude-code": env.CLAUDE_CODE_MODEL || undefined,
++      codex: env.CODEX_MODEL || undefined,
++    },
+     idleTtlMs: Number(env.IDLE_TTL_MINUTES ?? 30) * 60_000,
+   }
+ }
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/src/harness.ts squad-orchestrator-harness/src/harness.ts
+--- squad-orchestrator/src/harness.ts	1970-01-01 00:00:00.000000000 +0000
++++ squad-orchestrator-harness/src/harness.ts	2026-09-27 12:17:08.000000000 +0000
+@@ -0,0 +1,67 @@
++// Harnesses suportados e o que cada um entrega da experiência da squad.
++//
++// Todos falam o mesmo protocolo com o orquestrador (o subconjunto HTTP/SSE do `kilo serve`):
++//   kilo        -> `kilo serve` direto (squad nativa, board do Swarm, permissões do kilo.jsonc)
++//   claude-code -> ponte em sandbox/bridge com o Claude Agent SDK (subagentes = a mesma squad,
++//                  board emulado via MCP in-process, permissões via canUseTool + kilo.jsonc)
++//   codex       -> ponte com o @openai/codex-sdk (um agente só, sem board, sem aprovação interativa)
++// A UI usa `capabilities` para avisar o que não existe naquele harness.
++
++export const HARNESSES = ["kilo", "claude-code", "codex"] as const
++export type Harness = (typeof HARNESSES)[number]
++
++export interface HarnessInfo {
++  id: Harness
++  label: string
++  /** Agente primário padrão e os que fazem sentido oferecer na UI. */
++  defaultAgent: string
++  agents: { value: string; label: string }[]
++  capabilities: {
++    squad: boolean // subagentes aparecem como membros no grafo
++    board: boolean // board do Swarm (nativo ou emulado)
++    permissions: boolean // pedidos de aprovação chegam à UI
++  }
++  /** O que degrada, em uma frase, para a UI mostrar. */
++  note?: string
++  modelHint: string
++}
++
++export const HARNESS_INFO: Record<Harness, HarnessInfo> = {
++  kilo: {
++    id: "kilo",
++    label: "Kilo Code",
++    defaultAgent: "squad-lead",
++    agents: [
++      { value: "squad-lead", label: "squad-lead (squad própria)" },
++      { value: "orchestrator", label: "orchestrator (nativo do Kilo)" },
++      { value: "code", label: "code (agente único)" },
++    ],
++    capabilities: { squad: true, board: true, permissions: true },
++    modelHint: "provider/model, ex.: anthropic/claude-sonnet-5",
++  },
++  "claude-code": {
++    id: "claude-code",
++    label: "Claude Code",
++    defaultAgent: "squad-lead",
++    agents: [
++      { value: "squad-lead", label: "squad-lead (mesma squad, como subagentes)" },
++      { value: "claude", label: "claude (Claude Code puro)" },
++    ],
++    capabilities: { squad: true, board: true, permissions: true },
++    note: "Board emulado pela ponte (MCP); a squad roda como subagentes do Claude Code.",
++    modelHint: "sonnet, opus ou um id completo",
++  },
++  codex: {
++    id: "codex",
++    label: "Codex",
++    defaultAgent: "codex",
++    agents: [{ value: "codex", label: "codex (agente único)" }],
++    capabilities: { squad: false, board: false, permissions: false },
++    note: "Agente único: sem subagentes, sem board e sem pedidos de permissão (o container é o isolamento).",
++    modelHint: "id do modelo da OpenAI, ex.: gpt-5-codex",
++  },
++}
++
++export function isHarness(value: unknown): value is Harness {
++  return typeof value === "string" && (HARNESSES as readonly string[]).includes(value)
++}
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/src/kilo.ts squad-orchestrator-harness/src/kilo.ts
+--- squad-orchestrator/src/kilo.ts	2026-09-26 14:45:40.947625000 +0000
++++ squad-orchestrator-harness/src/kilo.ts	2026-09-27 12:17:08.000000000 +0000
+@@ -103,7 +103,10 @@
+   }
+ 
+   async promptAsync(sessionID: string, input: { text: string; agent?: string; model?: string }) {
+-    const model = parseModel(input.model)
++    // Kilo exige provider/model; a ponte aceita só o id (ex.: "sonnet"), então repassamos assim.
++    const model =
++      parseModel(input.model) ??
++      (input.model && this.sandbox.harness !== "kilo" ? { providerID: this.sandbox.harness, modelID: input.model } : undefined)
+     await this.request("POST", `/session/${sessionID}/prompt_async`, {
+       agent: input.agent,
+       model,
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/src/orchestrator.ts squad-orchestrator-harness/src/orchestrator.ts
+--- squad-orchestrator/src/orchestrator.ts	2026-09-26 14:45:40.949973000 +0000
++++ squad-orchestrator-harness/src/orchestrator.ts	2026-09-27 12:17:08.000000000 +0000
+@@ -1,5 +1,6 @@
+-// Task orchestrator: (repoUrl, branch, prompt) -> container -> git clone -> kilo serve
+-// -> health -> sessão -> prompt da squad. Guarda Task <-> sessionID <-> containerID.
++// Task orchestrator: (repoUrl, branch, prompt, harness) -> container -> git clone -> kilo serve
++// (ou a ponte do Claude Code / Codex, que fala o mesmo protocolo) -> health -> sessão -> prompt
++// da squad. Guarda Task <-> sessionID <-> containerID.
+ 
+ import type { Config } from "./config.js"
+ import { KiloClient } from "./kilo.js"
+@@ -51,7 +52,7 @@
+       // O entrypoint clona o repo antes de subir o kilo serve, então o health cobre o clone.
+       const alive = this.driver.isAlive ? () => this.driver.isAlive!(sandbox) : undefined
+       const version = await kilo.waitHealthy(180_000, 1_000, alive)
+-      this.relay.publish(taskID, "raw", { type: "sandbox.ready", version })
++      this.relay.publish(taskID, "raw", { type: "sandbox.ready", version, harness: task.harness })
+ 
+       // Assina o stream ANTES de mandar o prompt para não perder os primeiros eventos.
+       await Promise.race([this.relay.attach(this.store.get(taskID)!), timeout(15_000, "SSE /event não abriu")])
+@@ -60,7 +61,7 @@
+       this.store.update(taskID, { sessionID: session.id })
+       this.relay.publish(taskID, "raw", { type: "session.bound", sessionID: session.id })
+ 
+-      await kilo.promptAsync(session.id, { text: task.prompt, agent: task.agent, model: task.model ?? this.cfg.defaultModel })
++      await kilo.promptAsync(session.id, { text: task.prompt, agent: task.agent, model: this.modelFor(task) })
+       this.relay.setStatus(taskID, "running")
+     } catch (err) {
+       const message = err instanceof Error ? err.message : String(err)
+@@ -75,11 +76,15 @@
+   /** Follow-up do usuário na mesma sessão (ou comandos como "/goal pause"). */
+   async prompt(task: Task, text: string, agent?: string) {
+     const { kilo, sessionID } = this.require(task)
+-    await kilo.promptAsync(sessionID, { text, agent: agent ?? task.agent, model: task.model ?? this.cfg.defaultModel })
++    await kilo.promptAsync(sessionID, { text, agent: agent ?? task.agent, model: this.modelFor(task) })
+     this.store.touch(task.id)
+     this.relay.setStatus(task.id, "running")
+   }
+ 
++  private modelFor(task: Task) {
++    return task.model ?? this.cfg.defaultModels[task.harness]
++  }
++
+   async abort(task: Task) {
+     const { kilo, sessionID } = this.require(task)
+     await kilo.abort(sessionID)
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/src/routes.ts squad-orchestrator-harness/src/routes.ts
+--- squad-orchestrator/src/routes.ts	2026-09-26 13:51:33.681818000 +0000
++++ squad-orchestrator-harness/src/routes.ts	2026-09-27 12:17:08.000000000 +0000
+@@ -1,6 +1,7 @@
+ // API HTTP pública do orquestrador (a única coisa que o browser enxerga).
+ //
+-//   POST   /tasks                                 { repoUrl, branch?, prompt, agent?, model? } -> 202 Task
++//   GET    /harnesses                             -> harnesses habilitados + capacidades (para a UI)
++//   POST   /tasks                                 { repoUrl, branch?, prompt, harness?, agent?, model? } -> 202 Task
+ //   GET    /tasks                                 -> Task[]
+ //   GET    /tasks/:id                             -> Task
+ //   GET    /tasks/:id/events                      -> SSE de UiEvent (suporta Last-Event-ID / ?after=)
+@@ -19,6 +20,7 @@
+ import type { IncomingMessage, ServerResponse } from "node:http"
+ import { timingSafeEqual } from "node:crypto"
+ import type { Config } from "./config.js"
++import { HARNESS_INFO, isHarness } from "./harness.js"
+ import { KiloError, type PermissionReply } from "./kilo.js"
+ import { HttpError, type Orchestrator } from "./orchestrator.js"
+ import type { Relay } from "./relay.js"
+@@ -59,6 +61,11 @@
+ 
+   add("GET", "/health", () => ({ ok: true }))
+ 
++  add("GET", "/harnesses", () => ({
++    default: cfg.defaultHarness,
++    harnesses: cfg.harnesses.map((h) => HARNESS_INFO[h]),
++  }))
++
+   add("POST", "/tasks", async (ctx) => {
+     const body = await readJson(ctx.req)
+     const repoUrl = String(body.repoUrl ?? "").trim()
+@@ -67,11 +74,16 @@
+     if (!prompt) throw new HttpError(400, "prompt obrigatório")
+     const branch = body.branch ? String(body.branch) : undefined
+     if (branch && !/^[\w./-]+$/.test(branch)) throw new HttpError(400, "branch inválida")
++    const harness = body.harness === undefined || body.harness === "" ? cfg.defaultHarness : body.harness
++    if (!isHarness(harness) || !cfg.harnesses.includes(harness))
++      throw new HttpError(400, `harness inválido; habilitados: ${cfg.harnesses.join(", ")}`)
++    const defaultAgent = harness === "kilo" ? cfg.squadLeadAgent : HARNESS_INFO[harness].defaultAgent
+     const task = store.create(ctx.user, {
+       repoUrl,
+       branch,
+       prompt,
+-      agent: body.agent ? String(body.agent) : cfg.squadLeadAgent,
++      harness,
++      agent: body.agent ? String(body.agent) : defaultAgent,
+       model: body.model ? String(body.model) : undefined,
+     })
+     relay.publish(task.id, "task.status", { status: task.status })
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/src/sandbox.ts squad-orchestrator-harness/src/sandbox.ts
+--- squad-orchestrator/src/sandbox.ts	2026-09-26 14:48:53.286849000 +0000
++++ squad-orchestrator-harness/src/sandbox.ts	2026-09-27 12:22:06.000000000 +0000
+@@ -31,10 +31,13 @@
+       REPO_BRANCH: task.branch,
+       REPO_DIR: WORKDIR,
+       KILO_SERVER_PASSWORD: password,
++      // O entrypoint sobe `kilo serve` ou a ponte (sandbox/bridge) conforme o harness.
++      HARNESS: task.harness,
+     }
+     // Sem isolamento nativo: desliga o bwrap do Kilo (KILO_CONFIG_CONTENT tem precedência sobre KILO_CONFIG_DIR)
+     // e o container volta ao perfil de segurança padrão do Docker.
+     if (!this.cfg.sandboxNativeIsolation) env.KILO_CONFIG_CONTENT = JSON.stringify({ sandbox: { enabled: false } })
++    if (process.env.CODEX_SANDBOX_MODE) env.CODEX_SANDBOX_MODE = process.env.CODEX_SANDBOX_MODE
+     for (const name of this.cfg.sandboxEnvPassthrough) {
+       const value = process.env[name]
+       if (value) env[name] = value
+@@ -76,7 +79,7 @@
+       // ex.: "127.0.0.1:49153"
+       const hostPort = portOut.trim().split("\n")[0]?.split(":").pop()
+       if (!hostPort) throw new Error(`não achei a porta publicada: ${portOut}`)
+-      return { id, baseUrl: `http://127.0.0.1:${hostPort}`, password, directory: WORKDIR }
++      return { id, baseUrl: `http://127.0.0.1:${hostPort}`, password, directory: WORKDIR, harness: task.harness }
+     } catch (err) {
+       await exec("docker", ["rm", "-f", id]).catch(() => {})
+       throw err
+@@ -103,16 +106,18 @@
+ }
+ 
+ /**
+- * Aponta para um `kilo serve` já rodando (dev local, ou o mock em scripts/mock-kilo.ts).
+- * Não clona nada: assume que o diretório já é o repo.
++ * Aponta para um `kilo serve` (ou uma ponte da sandbox/bridge) já rodando: dev local, o mock
++ * em scripts/mock-kilo.ts ou a ponte com BRIDGE_FAKE=1. Não clona nada: assume que o
++ * diretório já é o repo. A URL depende do harness da tarefa (EXTERNAL_URL_CLAUDE_CODE/CODEX).
+  */
+ export class ExternalSandboxDriver implements SandboxDriver {
+   constructor(private cfg: Config) {}
+ 
+-  async provision(): Promise<SandboxHandle> {
++  async provision(task: Task): Promise<SandboxHandle> {
+     return {
+       id: "external",
+-      baseUrl: this.cfg.kiloExternalUrl,
++      harness: task.harness,
++      baseUrl: this.cfg.externalUrls[task.harness],
+       password: this.cfg.kiloExternalPassword,
+       directory: this.cfg.kiloExternalDirectory,
+     }
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/src/store.ts squad-orchestrator-harness/src/store.ts
+--- squad-orchestrator/src/store.ts	2026-09-26 14:45:40.719243000 +0000
++++ squad-orchestrator-harness/src/store.ts	2026-09-27 12:17:08.000000000 +0000
+@@ -11,7 +11,7 @@
+   private events = new Map<string, UiEvent[]>()
+   private seqs = new Map<string, number>()
+ 
+-  create(owner: string, input: CreateTaskInput & { agent: string }): Task {
++  create(owner: string, input: CreateTaskInput & { agent: string; harness: Task["harness"] }): Task {
+     const now = Date.now()
+     const task: Task = {
+       id: "tsk_" + randomUUID().replaceAll("-", "").slice(0, 20),
+@@ -19,6 +19,7 @@
+       repoUrl: input.repoUrl,
+       branch: input.branch ?? "", // vazio = branch padrão do repo
+       prompt: input.prompt,
++      harness: input.harness,
+       agent: input.agent,
+       model: input.model,
+       status: "queued",
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/src/types.ts squad-orchestrator-harness/src/types.ts
+--- squad-orchestrator/src/types.ts	2026-09-26 14:45:40.691137000 +0000
++++ squad-orchestrator-harness/src/types.ts	2026-09-27 12:17:08.000000000 +0000
+@@ -1,5 +1,7 @@
+ // Tipos do domínio do orquestrador.
+ 
++import type { Harness } from "./harness.js"
++
+ export type TaskStatus =
+   | "queued" // aceita, aguardando provisionamento
+   | "provisioning" // container subindo + git clone
+@@ -15,6 +17,7 @@
+   baseUrl: string // URL interna do kilo serve (nunca exposta ao browser)
+   password: string // KILO_SERVER_PASSWORD gerada por tarefa
+   directory: string // diretório do repo dentro da sandbox (query ?directory=)
++  harness: Harness // quem responde na porta: kilo serve ou a ponte (Claude Code / Codex)
+ }
+ 
+ export interface Task {
+@@ -23,6 +26,7 @@
+   repoUrl: string
+   branch: string // "" = branch padrão do repo
+   prompt: string
++  harness: Harness
+   agent: string
+   model?: string
+   status: TaskStatus
+@@ -60,6 +64,7 @@
+   repoUrl: string
+   branch?: string
+   prompt: string
++  harness?: Harness
+   agent?: string
+   model?: string
+ }
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/web/src/api.ts squad-orchestrator-harness/web/src/api.ts
+--- squad-orchestrator/web/src/api.ts	2026-09-26 14:18:39.011264000 +0000
++++ squad-orchestrator-harness/web/src/api.ts	2026-09-27 12:18:05.000000000 +0000
+@@ -10,6 +10,20 @@
+   | "error"
+   | "stopped"
+ 
++export type Harness = "kilo" | "claude-code" | "codex"
++
++export interface HarnessInfo {
++  id: Harness
++  label: string
++  defaultAgent: string
++  agents: { value: string; label: string }[]
++  capabilities: { squad: boolean; board: boolean; permissions: boolean }
++  note?: string
++  modelHint: string
++}
++
++export const HARNESS_LABEL: Record<Harness, string> = { kilo: "Kilo Code", "claude-code": "Claude Code", codex: "Codex" }
++
+ export interface SquadMember {
+   callID: string
+   sessionID?: string
+@@ -36,6 +50,7 @@
+   repoUrl: string
+   branch: string
+   prompt: string
++  harness?: Harness // ausente em tarefas de orquestradores antigos = kilo
+   agent: string
+   model?: string
+   status: TaskStatus
+@@ -118,9 +133,10 @@
+ }
+ 
+ export const api = {
++  harnesses: () => request<{ default: Harness; harnesses: HarnessInfo[] }>("GET", "/harnesses"),
+   listTasks: () => request<Task[]>("GET", "/tasks"),
+   getTask: (id: string) => request<Task>("GET", `/tasks/${id}`),
+-  createTask: (input: { repoUrl: string; branch?: string; prompt: string; agent?: string; model?: string }) =>
++  createTask: (input: { repoUrl: string; branch?: string; prompt: string; harness?: Harness; agent?: string; model?: string }) =>
+     request<Task>("POST", "/tasks", input),
+   prompt: (id: string, text: string) => request("POST", `/tasks/${id}/prompt`, { text }),
+   replyPermission: (id: string, permissionID: string, reply: "once" | "always" | "reject") =>
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/web/src/components/Stage.tsx squad-orchestrator-harness/web/src/components/Stage.tsx
+--- squad-orchestrator/web/src/components/Stage.tsx	2026-09-26 21:06:27.146487000 +0000
++++ squad-orchestrator-harness/web/src/components/Stage.tsx	2026-09-27 12:20:07.000000000 +0000
+@@ -5,7 +5,7 @@
+ //   - rodapé: última fala do líder + campo para falar com a squad
+ 
+ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
+-import { api, type PermissionRequest } from "../api"
++import { HARNESS_LABEL, api, type PermissionRequest } from "../api"
+ import { STATE_LABEL, agentColor, agentOfSession, boardLabel, buildSquad, openAlert, type AgentNode } from "../squad"
+ import type { ChatPart, TaskState } from "../useTaskStream"
+ import { StatusTag, clock, timeAgo } from "./common"
+@@ -71,7 +71,7 @@
+     <div className="stage-empty">
+       {state.task && <StatusTag status={state.task.status} />}
+       <div className="h3" style={{ marginTop: 16 }}>
+-        {status === "error" ? "A sandbox não subiu." : "Preparando a sandbox e o Kilo…"}
++        {status === "error" ? "A sandbox não subiu." : `Preparando a sandbox e o ${HARNESS_LABEL[state.task?.harness ?? "kilo"]}…`}
+       </div>
+       <div className="small muted" style={{ marginTop: 8 }}>
+         {status === "error" ? (state.task?.error ?? last?.message) : "O palco aparece quando a sessão do líder iniciar."}
+@@ -104,7 +104,7 @@
+         <span className="small">
+           <strong>{agentOfSession(state, sessionID)}</strong> não conseguiu falar com o modelo{r.attempt ? ` (tentativa ${r.attempt})` : ""}
+         </span>
+-        <span className="alert-text small" title={r.message}>{r.message ?? "sem detalhe do Kilo"}</span>
++        <span className="alert-text small" title={r.message}>{r.message ?? "sem detalhe do harness"}</span>
+         <button className="pill quiet small-pill" onClick={() => api.abort(taskID)}>
+           Parar turno
+         </button>
+@@ -222,6 +222,17 @@
+         kind: b.type === "VETO" ? "veto" : b.type === "ASK" || b.type === "HOLD" ? "ask" : undefined,
+       })
+     }
++    // Agente único (Codex, ou "code"/"claude" sem squad): sem delegações nem board, o letreiro
++    // mostra os passos do próprio agente.
++    if (!Object.keys(state.members).length && !state.board.length) {
++      const color = agentColor(lead, true)
++      for (const id of state.partOrder) {
++        const p = state.parts[id]
++        if (!p?.at || p.type !== "tool" || !p.tool || QUIET_TOOLS.has(p.tool)) continue
++        const failed = p.toolStatus === "error"
++        out.push({ at: p.at, text: `${lead} · ${p.tool}${p.toolTitle ? ` · ${p.toolTitle}` : ""}${failed ? " (falhou)" : ""}`, color, kind: failed ? "veto" : undefined })
++      }
++    }
+     for (const p of Object.values(state.permissions))
+       out.push({
+         at: p.askedAt,
+@@ -230,7 +241,7 @@
+         color: agentColor(agentOfSession(state, p.sessionID), p.sessionID === state.task?.sessionID),
+       })
+     return out.sort((a, b) => a.at - b.at).slice(-5)
+-  }, [state.members, state.board, state.permissions, state.task])
++  }, [state.members, state.board, state.permissions, state.task, state.parts, state.partOrder])
+ 
+   if (!lines.length) return null
+   return (
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/web/src/components/TaskList.tsx squad-orchestrator-harness/web/src/components/TaskList.tsx
+--- squad-orchestrator/web/src/components/TaskList.tsx	2026-09-26 14:45:40.993264000 +0000
++++ squad-orchestrator-harness/web/src/components/TaskList.tsx	2026-09-27 12:21:17.000000000 +0000
+@@ -1,13 +1,31 @@
+ import { useEffect, useState, type FormEvent } from "react"
+-import { api, type Task } from "../api"
++import { HARNESS_LABEL, api, type Harness, type HarnessInfo, type Task } from "../api"
+ import { StatusDot, STATUS_LABEL, repoName, timeAgo } from "./common"
+ 
+-const AGENTS = [
+-  { value: "squad-lead", label: "squad-lead (squad própria)" },
+-  { value: "orchestrator", label: "orchestrator (nativo do Kilo)" },
+-  { value: "code", label: "code (agente único)" },
++// Usado só se o orquestrador for antigo e não tiver GET /harnesses.
++const FALLBACK: HarnessInfo[] = [
++  {
++    id: "kilo",
++    label: "Kilo Code",
++    defaultAgent: "squad-lead",
++    agents: [
++      { value: "squad-lead", label: "squad-lead (squad própria)" },
++      { value: "orchestrator", label: "orchestrator (nativo do Kilo)" },
++      { value: "code", label: "code (agente único)" },
++    ],
++    capabilities: { squad: true, board: true, permissions: true },
++    modelHint: "provider/model",
++  },
+ ]
+ 
++/** Uma linha sobre o que o harness entrega da squad, para escolher sabendo o que muda. */
++function capabilityLine(h: HarnessInfo) {
++  const { squad, board, permissions } = h.capabilities
++  const who = h.id === "kilo" ? "Squad nativa" : squad ? "Squad como subagentes" : "Agente único"
++  const extras = [board && "board", permissions && "permissões"].filter(Boolean)
++  return extras.length ? `${who}, ${extras.join(" e ")}.` : `${who}, sem board nem aprovações.`
++}
++
+ export function TaskList({ onOpen }: { onOpen: (id: string) => void }) {
+   const [tasks, setTasks] = useState<Task[]>([])
+   const [error, setError] = useState<string>()
+@@ -15,8 +33,29 @@
+   const [repoUrl, setRepoUrl] = useState("")
+   const [branch, setBranch] = useState("")
+   const [prompt, setPrompt] = useState("")
+-  const [agent, setAgent] = useState(AGENTS[0]!.value)
++  const [harnesses, setHarnesses] = useState<HarnessInfo[]>(FALLBACK)
++  const [harness, setHarness] = useState<Harness>("kilo")
++  const [agent, setAgent] = useState(FALLBACK[0]!.defaultAgent)
+   const [model, setModel] = useState("")
++  const info = harnesses.find((h) => h.id === harness) ?? harnesses[0]!
++
++  useEffect(() => {
++    api
++      .harnesses()
++      .then((r) => {
++        if (!r.harnesses.length) return
++        setHarnesses(r.harnesses)
++        const first = r.harnesses.find((h) => h.id === r.default) ?? r.harnesses[0]!
++        setHarness(first.id)
++        setAgent(first.defaultAgent)
++      })
++      .catch(() => {})
++  }, [])
++
++  const pickHarness = (h: HarnessInfo) => {
++    setHarness(h.id)
++    setAgent(h.defaultAgent)
++  }
+ 
+   useEffect(() => {
+     let alive = true
+@@ -38,7 +77,7 @@
+     setBusy(true)
+     setError(undefined)
+     try {
+-      const task = await api.createTask({ repoUrl, branch: branch || undefined, prompt, agent, model: model || undefined })
++      const task = await api.createTask({ repoUrl, branch: branch || undefined, prompt, harness, agent, model: model || undefined })
+       onOpen(task.id)
+     } catch (err: any) {
+       setError(err.message)
+@@ -59,6 +98,25 @@
+         <form className="card form" onSubmit={submit}>
+           <div className="label">Nova tarefa</div>
+           <div className="field">
++            <span className="small muted" id="harness-label">Harness</span>
++            <div className="harness-pick" role="radiogroup" aria-labelledby="harness-label">
++              {harnesses.map((h) => (
++                <button
++                  key={h.id}
++                  type="button"
++                  role="radio"
++                  aria-checked={h.id === harness}
++                  className={h.id === harness ? "on" : ""}
++                  onClick={() => pickHarness(h)}
++                >
++                  <span className="harness-name">{h.label}</span>
++                  <span className="harness-caps">{capabilityLine(h)}</span>
++                </button>
++              ))}
++            </div>
++            {info.note && <span className="small muted">{info.note}</span>}
++          </div>
++          <div className="field">
+             <label className="small muted" htmlFor="repo">Repositório</label>
+             <input
+               id="repo"
+@@ -76,8 +134,8 @@
+             </div>
+             <div className="field" style={{ flex: 1.4 }}>
+               <label className="small muted" htmlFor="agent">Agente líder</label>
+-              <select id="agent" className="input" value={agent} onChange={(e) => setAgent(e.target.value)}>
+-                {AGENTS.map((a) => (
++              <select id="agent" className="input" value={agent} onChange={(e) => setAgent(e.target.value)} disabled={info.agents.length < 2}>
++                {info.agents.map((a) => (
+                   <option key={a.value} value={a.value}>
+                     {a.label}
+                   </option>
+@@ -98,8 +156,8 @@
+             />
+           </div>
+           <div className="field">
+-            <label className="small muted" htmlFor="model">Modelo (opcional, provider/model)</label>
+-            <input id="model" className="input mono" placeholder="padrão do orquestrador" value={model} onChange={(e) => setModel(e.target.value)} />
++            <label className="small muted" htmlFor="model">Modelo (opcional)</label>
++            <input id="model" className="input mono" placeholder={info.modelHint} value={model} onChange={(e) => setModel(e.target.value)} />
+           </div>
+           {error && <div className="small" style={{ color: "var(--alert)" }}>{error}</div>}
+           <div>
+@@ -128,7 +186,7 @@
+               <div style={{ minWidth: 0 }}>
+                 <div className="task-title">{t.prompt}</div>
+                 <div className="small muted">
+-                  {repoName(t.repoUrl)} · {t.branch || "branch padrão"} · {Object.keys(t.members).length} membros
++                  {HARNESS_LABEL[t.harness ?? "kilo"]} · {repoName(t.repoUrl)} · {t.branch || "branch padrão"} · {Object.keys(t.members).length} membros
+                 </div>
+               </div>
+               <div style={{ textAlign: "right" }}>
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/web/src/components/TaskView.tsx squad-orchestrator-harness/web/src/components/TaskView.tsx
+--- squad-orchestrator/web/src/components/TaskView.tsx	2026-09-26 21:06:27.280318000 +0000
++++ squad-orchestrator-harness/web/src/components/TaskView.tsx	2026-09-27 12:18:31.000000000 +0000
+@@ -1,5 +1,5 @@
+ import { useEffect, useState } from "react"
+-import { api } from "../api"
++import { HARNESS_LABEL, api } from "../api"
+ import { useTaskStream } from "../useTaskStream"
+ import { Board } from "./Board"
+ import { Chat } from "./Chat"
+@@ -68,6 +68,7 @@
+             <span className="small">
+               <strong>{repoName(task.repoUrl)}</strong> <span className="muted">· {task.branch || "branch padrão"}</span>
+             </span>
++            <span className="tag" title="Harness que roda a squad nesta tarefa">{HARNESS_LABEL[task.harness ?? "kilo"]}</span>
+             <StatusTag status={task.status} />
+             {!state.connected && <span className="tag">Reconectando…</span>}
+           </>
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/web/src/components/common.tsx squad-orchestrator-harness/web/src/components/common.tsx
+--- squad-orchestrator/web/src/components/common.tsx	2026-09-26 14:19:11.898596000 +0000
++++ squad-orchestrator-harness/web/src/components/common.tsx	2026-09-27 12:18:05.000000000 +0000
+@@ -3,7 +3,7 @@
+ export const STATUS_LABEL: Record<TaskStatus, string> = {
+   queued: "Na fila",
+   provisioning: "Criando sandbox",
+-  starting: "Subindo Kilo",
++  starting: "Subindo o agente",
+   running: "Trabalhando",
+   waiting_permission: "Aguardando você",
+   idle: "Concluído",
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/web/src/main.tsx squad-orchestrator-harness/web/src/main.tsx
+--- squad-orchestrator/web/src/main.tsx	2026-09-26 20:14:40.147477000 +0000
++++ squad-orchestrator-harness/web/src/main.tsx	2026-09-27 12:18:05.000000000 +0000
+@@ -41,7 +41,7 @@
+               Squad Arena
+             </span>
+           </a>
+-          <span className="label">Kilo · self-hosted</span>
++          <span className="label">Kilo · Claude Code · Codex · self-hosted</span>
+         </header>
+       )}
+       {taskID ? <TaskView taskID={taskID} onBack={() => go("/")} /> : <TaskList onOpen={(id) => go(`/tasks/${id}`)} />}
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/web/src/squad.ts squad-orchestrator-harness/web/src/squad.ts
+--- squad-orchestrator/web/src/squad.ts	2026-09-26 20:13:19.188045000 +0000
++++ squad-orchestrator-harness/web/src/squad.ts	2026-09-27 12:18:05.000000000 +0000
+@@ -132,6 +132,8 @@
+   "squad-lead": "#e6e6e6",
+   orchestrator: "#e6e6e6",
+   code: "#e6e6e6",
++  claude: "#e6e6e6",
++  codex: "#e6e6e6",
+   architect: "#8052ff",
+   developer: "#63a1ff",
+   qa: "#59d499",
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/web/src/styles.css squad-orchestrator-harness/web/src/styles.css
+--- squad-orchestrator/web/src/styles.css	2026-09-26 21:10:18.793329000 +0000
++++ squad-orchestrator-harness/web/src/styles.css	2026-09-27 12:20:07.000000000 +0000
+@@ -1017,3 +1017,46 @@
+   image-rendering: pixelated;
+   cursor: pointer;
+ }
++
++/* ---------- Escolha do harness (nova tarefa) ---------- */
++.harness-pick {
++  display: grid;
++  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
++  gap: var(--s1);
++}
++.harness-pick button {
++  display: flex;
++  flex-direction: column;
++  align-items: flex-start;
++  gap: 4px;
++  text-align: left;
++  padding: 10px 12px;
++  border: 0;
++  border-radius: var(--r);
++  background: var(--raised);
++  color: var(--muted);
++  box-shadow: 0 0 0 1px var(--line);
++  cursor: pointer;
++  font: inherit;
++}
++.harness-pick button:hover {
++  color: var(--text);
++}
++.harness-pick button.on {
++  background: var(--graphite);
++  color: var(--text);
++  box-shadow: var(--key);
++}
++.harness-pick button:focus-visible {
++  outline: 2px solid var(--mist);
++  outline-offset: 2px;
++}
++.harness-name {
++  font-weight: 600;
++  font-size: 14px;
++}
++.harness-caps {
++  font-size: 12px;
++  color: var(--muted);
++  line-height: 1.35;
++}
+diff -ruN -x node_modules -x screenshots -x package-lock.json -x dist squad-orchestrator/web/src/useTaskStream.ts squad-orchestrator-harness/web/src/useTaskStream.ts
+--- squad-orchestrator/web/src/useTaskStream.ts	2026-09-26 20:03:54.255364000 +0000
++++ squad-orchestrator-harness/web/src/useTaskStream.ts	2026-09-27 12:20:07.000000000 +0000
+@@ -13,6 +13,7 @@
+   tool?: string
+   toolStatus?: string
+   toolTitle?: string
++  at?: number // quando a parte apareceu pela primeira vez
+ }
+ 
+ export interface MessageInfo {
+@@ -184,6 +185,7 @@
+     tool: raw.tool,
+     toolStatus: raw.state?.status,
+     toolTitle: raw.state?.title ?? raw.state?.input?.description ?? summarizeInput(raw.state?.input),
++    at: s.parts[raw.id]?.at ?? at,
+   }
+   const exists = raw.id in s.parts
+   const activityText = isTool ? `${raw.tool}${part.toolTitle ? ` · ${part.toolTitle}` : ""}` : lastLine(part.text)

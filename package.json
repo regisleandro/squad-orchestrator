@@ -1,0 +1,22 @@
+{
+  "name": "squad-orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "POC: orquestrador self-hosted de squads agênticas sobre kilo serve em sandboxes Docker",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
+    "start": "node --env-file-if-exists=.env dist/index.js",
+    "build": "tsc -p .",
+    "typecheck": "tsc -p . --noEmit",
+    "mock:kilo": "tsx scripts/mock-kilo.ts",
+    "smoke": "tsx scripts/smoke.ts",
+    "sandbox:build": "docker build -t squad-sandbox:dev sandbox"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

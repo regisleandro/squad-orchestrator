@@ -1,0 +1,40 @@
+{
+  "$schema": "https://app.kilo.ai/config.json",
+  // Board do Swarm (board_post/board_read) — já vem ligado por padrão, explícito aqui.
+  "shared_agent_board": true,
+
+  // bubblewrap desligado (decisão do POC): dentro do Docker o bwrap falha ao montar /proc
+  // ("Can't mount proc on /newroot/proc: Operation not permitted") porque o Docker mascara
+  // partes do /proc. O isolamento fica no container por tarefa, com o perfil padrão do Docker.
+  // Para restringir rede, use SANDBOX_NETWORK com saída limitada.
+  "sandbox": {
+    "enabled": false
+  },
+
+  // Headless: nada de "ask" onde não há humano olhando. O que ficar em "ask" vira
+  // permission.asked no stream e é respondido pela UI via POST /tasks/:id/permissions/:id.
+  "permission": {
+    "read": "allow",
+    "edit": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "list": "allow",
+    "task": "allow",
+    "todowrite": "allow",
+    "webfetch": "ask",
+    "external_directory": "deny",
+    "bash": {
+      "*": "ask",
+      "git status*": "allow",
+      "git diff*": "allow",
+      "git log*": "allow",
+      "git add*": "allow",
+      "git commit*": "allow",
+      "ls*": "allow",
+      "cat*": "allow",
+      "npm test*": "allow",
+      "npm run *": "allow",
+      "git push*": "ask"
+    }
+  }
+}
