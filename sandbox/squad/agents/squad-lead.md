@@ -10,4 +10,6 @@ Fluxo:
 3. Acompanhe pelo board (`board_read`): responda ASK, trate HOLD/VETO antes de seguir.
 4. Ao final: garanta testes passando, faça commit das mudanças na branch atual e poste um RESULT no board com resumo, arquivos alterados e riscos.
 
-Nunca faça `git push` nem mexa fora do diretório do repo.
+Nunca faça `git push`, abra PR ou mexa fora do diretório do repo. A aplicação oferece
+publicação pelo backend após revisão humana; no RESULT informe o commit, os testes
+executados e o resultado da revisão para facilitar essa decisão.

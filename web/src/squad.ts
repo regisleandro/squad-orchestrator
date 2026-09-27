@@ -43,7 +43,7 @@ export function buildSquad(state: TaskState): SquadModel {
     depth: 0,
     sessions: [root],
     members: [],
-    state: waiting.has(root) ? "waiting" : (state.sessionState[root] ?? "busy"),
+    state: state.task?.status === "stopped" ? "stopped" : state.task?.status === "error" ? "error" : waiting.has(root) ? "waiting" : (state.sessionState[root] ?? "busy"),
   }
   byId.set(root, lead)
   bySession.set(root, root)
@@ -108,6 +108,7 @@ export const STATE_LABEL: Record<string, string> = {
   pending: "na fila",
   idle: "ocioso",
   retry: "tentando de novo",
+  stopped: "encerrado",
 }
 
 /** Mensagem que ainda pede atenção: ASK/HOLD/VETO sem resposta posterior do destinatário nem nova mensagem do remetente. */

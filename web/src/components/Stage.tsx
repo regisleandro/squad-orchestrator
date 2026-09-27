@@ -13,6 +13,7 @@ import { Graph } from "./Graph"
 import { useNow } from "../clock"
 import { Markdown, Thinking } from "./Markdown"
 import { Office } from "./Office"
+import { TaskFailure } from "./TaskFailure"
 
 const QUIET_TOOLS = new Set(["read", "grep", "glob", "list", "board_read", "todoread"])
 
@@ -31,7 +32,7 @@ export function Stage({
   /** Replay: muda a cada salto na linha do tempo; remonta a cena para não animar o salto. */
   epoch?: number
 }) {
-  const model = useMemo(() => buildSquad(state), [state.task?.sessionID, state.task?.agent, state.members, state.permissions, state.sessionState])
+  const model = useMemo(() => buildSquad(state), [state.task?.sessionID, state.task?.agent, state.task?.status, state.members, state.permissions, state.sessionState])
   const [selected, setSelected] = useState<string>()
   const [selectedPost, setSelectedPost] = useState<string>()
   const node = selected ? model.byId.get(selected) : undefined
@@ -166,13 +167,8 @@ function AlertBar({ taskID, state, onSelect, readOnly }: { taskID: string; state
     )
   }
 
-  if (state.task?.status === "error" && state.task.error) {
-    return (
-      <div className="alert-bar veto">
-        <span className="tag alert">Erro</span>
-        <span className="alert-text small">{state.task.error}</span>
-      </div>
-    )
+  if (readOnly && state.task?.status === "error" && state.task.error) {
+    return <TaskFailure taskID={taskID} message={state.task.error} readOnly />
   }
   return null
 }
@@ -589,11 +585,15 @@ function LeadBar({ taskID, state, readOnly }: { taskID: string; state: TaskState
   const [error, setError] = useState<string>()
 
   let said: string | undefined
+  let fullMessage: string | undefined
   for (let i = state.partOrder.length - 1; i >= 0 && !said; i--) {
     const p = state.parts[state.partOrder[i]!]
     if (!p || p.sessionID !== root || p.type !== "text" || !p.text.trim()) continue
     if (p.messageID && state.messages[p.messageID]?.role === "user") continue
     said = plainOneLine(p.text)
+    fullMessage = p.messageID
+      ? state.partOrder.map((id) => state.parts[id]).filter((part) => part?.messageID === p.messageID && part.type === "text").map((part) => part.text).join("\n\n")
+      : p.text
   }
 
   const send = async () => {
@@ -616,17 +616,26 @@ function LeadBar({ taskID, state, readOnly }: { taskID: string; state: TaskState
       void send()
     }
   }
-  const canSend = !!root && state.task?.status !== "stopped"
+  const canSend = !!root && state.task?.status !== "stopped" && state.task?.publication?.status !== "publishing"
+  const summary = state.task?.status === "error" ? "Turno interrompido. Confira a falha acima para continuar." : said ?? (state.task?.status === "idle" ? "Turno concluído. Você pode enviar uma nova instrução." : root ? "Planejando…" : state.task?.prompt)
+  const leadLabel = <span className="label" style={{ color: agentColor(state.task?.agent, true) }}>{state.task?.agent ?? "líder"}</span>
 
   return (
     <div className="lead-bar">
-      <div className="lead-said">
-        <span className="label" style={{ color: agentColor(state.task?.agent, true) }}>{state.task?.agent ?? "líder"}</span>
-        <span className="small lead-said-text">{said ?? (root ? "Planejando…" : state.task?.prompt)}</span>
-      </div>
+      {fullMessage ? (
+        <details className="lead-result">
+          <summary className="lead-said" aria-label="Expandir ou recolher a última mensagem do líder">
+            {leadLabel}
+            <span className="small lead-said-text">{summary}</span>
+            <span className="lead-result-action small"><span className="when-closed">Ler resultado completo ↓</span><span className="when-open">Recolher ↑</span></span>
+          </summary>
+          <div className="lead-result-body" tabIndex={0} aria-label="Mensagem completa do líder"><Markdown text={fullMessage} /></div>
+        </details>
+      ) : <div className="lead-said">{leadLabel}<span className="small lead-said-text">{summary}</span></div>}
       {!readOnly && <div className="lead-compose">
         <input
           className="input"
+          aria-label="Mensagem para a squad"
           placeholder={canSend ? "Fale com a squad (Enter envia)" : "Aguardando a sessão iniciar…"}
           value={text}
           onChange={(e) => setText(e.target.value)}

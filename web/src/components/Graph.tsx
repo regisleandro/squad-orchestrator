@@ -68,7 +68,7 @@ export function Graph({
   perLine?: number // máximo de nós por linha antes de quebrar (menor em telas estreitas)
   className?: string
 }) {
-  const model = useMemo(() => buildSquad(state), [state.task?.sessionID, state.task?.agent, state.members, state.permissions, state.sessionState])
+  const model = useMemo(() => buildSquad(state), [state.task?.sessionID, state.task?.agent, state.task?.status, state.members, state.permissions, state.sessionState])
   const { nodes, W, height } = useMemo(() => layout(model, width, showBubbles ? TOP_BUBBLES : TOP, showBubbles ? ROW_BUBBLES : ROW, perLine), [model, width, showBubbles, perLine])
   const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes])
   const { pulses, bubbles } = useFlow(model, state.board, byId)

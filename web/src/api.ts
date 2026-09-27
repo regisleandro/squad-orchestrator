@@ -55,11 +55,43 @@ export interface Task {
   model?: string
   status: TaskStatus
   error?: string
+  sandbox?: { id: string }
+  publication?: Publication
   sessionID?: string
   members: Record<string, SquadMember>
   pendingPermissions: Record<string, PermissionRequest>
   createdAt: number
   updatedAt: number
+}
+
+export interface PullRequestResult {
+  number: number
+  url: string
+  branch: string
+  baseBranch: string
+  commit: string
+  draft: boolean
+}
+
+export interface Publication {
+  status: "publishing" | "published" | "error"
+  step: "checking" | "committing" | "pushing" | "creating" | "done"
+  error?: string
+  result?: PullRequestResult
+}
+
+export interface PublicationPreview {
+  branch: string
+  baseBranch: string
+  head: string
+  base: string
+  version: string
+  diff: string
+  files: number
+  commits: string[]
+  hasUncommitted: boolean
+  title: string
+  body: string
 }
 
 export interface BoardMessage {
@@ -145,6 +177,9 @@ export const api = {
   board: (id: string) => request<SessionBoard>("GET", `/tasks/${id}/board?limit=50`),
   resetBoard: (id: string, revision: number) => request<SessionBoard>("POST", `/tasks/${id}/board/reset`, { revision }),
   diff: (id: string) => request<unknown>("GET", `/tasks/${id}/diff`),
+  publicationPreview: (id: string) => request<PublicationPreview>("GET", `/tasks/${id}/publication`),
+  publish: (id: string, input: { title: string; body: string; version: string; reviewed: boolean; draft: boolean }) =>
+    request<PullRequestResult>("POST", `/tasks/${id}/publication`, input),
   abort: (id: string) => request("POST", `/tasks/${id}/abort`),
   destroy: (id: string) => request("DELETE", `/tasks/${id}`),
 }

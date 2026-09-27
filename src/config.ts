@@ -13,6 +13,8 @@ export interface Config {
   sandboxMemory: string
   sandboxEnvPassthrough: string[]
   sandboxNativeIsolation: boolean
+  /** Caminho absoluto no host do Docker para um bundle PEM de CAs confiáveis. */
+  sandboxCaBundle?: string
   kiloExternalUrl: string
   kiloExternalPassword: string
   kiloExternalDirectory: string
@@ -29,6 +31,8 @@ export interface Config {
 }
 
 export function loadConfig(env = process.env): Config {
+  if (env.SANDBOX_CA_BUNDLE && !env.SANDBOX_CA_BUNDLE.startsWith("/"))
+    throw new Error("SANDBOX_CA_BUNDLE exige um caminho absoluto no host do Docker")
   if (env.SANDBOX_USE_CONTAINER_DNS === "true" && !env.SANDBOX_NETWORK)
     throw new Error("SANDBOX_USE_CONTAINER_DNS exige SANDBOX_NETWORK")
   const apiToken = env.API_TOKEN ?? ""
@@ -50,6 +54,7 @@ export function loadConfig(env = process.env): Config {
       .map((s) => s.trim())
       .filter(Boolean),
     sandboxNativeIsolation: env.SANDBOX_NATIVE_ISOLATION === "true",
+    sandboxCaBundle: env.SANDBOX_CA_BUNDLE || undefined,
     kiloExternalUrl,
     kiloExternalPassword: env.KILO_EXTERNAL_PASSWORD ?? "",
     kiloExternalDirectory: env.KILO_EXTERNAL_DIRECTORY ?? "",

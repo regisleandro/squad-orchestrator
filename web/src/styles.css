@@ -1360,3 +1360,67 @@ select.input option {
   margin-top: 10px;
   flex-wrap: wrap;
 }
+
+/* Falhas permanecem legíveis em todos os modos de acompanhamento. */
+.task-failure {
+  margin: 12px var(--s3);
+  padding: 16px 20px;
+  border: 1px solid color-mix(in oklch, var(--alert) 45%, var(--bone));
+  border-radius: var(--r-badge);
+  background: var(--surface);
+  flex-shrink: 0;
+}
+.failure-status { color: var(--alert); }
+.failure-title { font-size: 18px; line-height: 1.4; margin: 6px 0 8px; }
+.task-failure p { max-width: 75ch; margin: 6px 0; }
+.failure-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.failure-details { margin-top: 12px; font-size: 12px; }
+.failure-details summary { cursor: pointer; color: var(--muted); width: fit-content; }
+.failure-details pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; font-family: var(--mono); }
+.task-failure :is(button, a, summary):focus-visible { outline: 2px solid var(--ink); outline-offset: 4px; }
+@media (max-width: 700px) {
+  .task-failure { margin: 8px 12px; padding: 12px; }
+  .failure-title { font-size: 16px; }
+  .failure-actions { align-items: stretch; }
+}
+
+/* Última fala do líder: resumo compacto e mensagem completa sob demanda. */
+.lead-result { min-width: 0; }
+.lead-result > summary { cursor: pointer; list-style: none; min-height: 36px; }
+.lead-result > summary::-webkit-details-marker { display: none; }
+.lead-result-action { flex-shrink: 0; white-space: nowrap; color: var(--ink); }
+.lead-result .when-open, .lead-result[open] .when-closed { display: none; }
+.lead-result[open] .when-open { display: inline; }
+.lead-result-body { max-height: min(45vh, 420px); overflow: auto; overscroll-behavior: contain; margin: 8px 0 12px; padding: 12px 16px; background: var(--surface); border: 1px solid var(--bone); border-radius: var(--r-badge); font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+.lead-result-body pre { overflow: auto; }
+.lead-result :is(summary, .lead-result-body):focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+.publication-dialog { position: fixed; inset: 0 0 0 auto; width: min(720px, 100vw); max-width: 100vw; height: 100dvh; max-height: 100dvh; padding: 0; margin: 0; border: 1px solid var(--bone); background: var(--surface); color: var(--ink); }
+.publication-dialog[open] { display: flex; flex-direction: column; }
+.publication-dialog::backdrop { background: oklch(12% 0.005 250 / 0.7); }
+.publication-dialog .col-head { flex-shrink: 0; }
+.publication-form { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.publication-content { flex: 1; overflow: auto; padding: 20px 24px; }
+.publication-content > p { margin: 0 0 16px; }
+.publication-branches { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0; }
+.publication-branches dt { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+.publication-branches dd { margin: 0; font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
+.publication-diff { margin: 20px 0; }
+.publication-diff summary { cursor: pointer; font-size: 13px; padding: 8px 0; }
+.publication-diff pre { max-height: 32vh; overflow: auto; padding: 12px; border: 1px solid var(--bone); border-radius: var(--r-badge); background: var(--raised); font-family: var(--mono); font-size: 12px; }
+.publication-content .field { margin: 16px 0; }
+.publication-check { display: flex; align-items: flex-start; gap: 12px; padding: 12px 0; font-size: 14px; cursor: pointer; }
+.publication-check input { width: 18px; height: 18px; flex-shrink: 0; margin-top: 2px; accent-color: var(--ink); }
+.publication-error { border: 1px solid var(--alert); border-radius: var(--r-badge); padding: 12px; margin: 12px 0; }
+.publication-error p { color: var(--alert); font-size: 14px; margin: 0 0 8px; }
+.publication-footer { border-top: 1px solid var(--bone); padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.publication-dialog :is(button, a, summary, pre, input, textarea):focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+.publication-dialog .pill { min-height: 44px; }
+@media (max-width: 700px) {
+  .lead-result > summary { flex-wrap: wrap; gap: 4px 12px; }
+  .lead-result .lead-said-text { min-width: 0; flex: 1; }
+  .lead-result-action { width: 100%; font-size: 12px; padding: 4px 0; }
+  .publication-content { padding: 16px; }
+  .publication-footer { padding: 12px 16px; }
+  .publication-branches { grid-template-columns: 1fr; gap: 8px; }
+}

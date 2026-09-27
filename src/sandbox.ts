@@ -17,9 +17,34 @@ export interface SandboxDriver {
   logs?(handle: SandboxHandle, tail?: number): Promise<string>
   /** false quando o container já morreu (ex.: git clone falhou). */
   isAlive?(handle: SandboxHandle): Promise<boolean>
+  /** Reconecta a um container sobrevivente após interrupção do host/orquestrador. */
+  restore?(task: Task): Promise<SandboxHandle | undefined>
+  /** Comandos internos do backend, nunca expostos como execução arbitrária pela API. */
+  execute?(handle: SandboxHandle, command: string, args: string[], input?: string): Promise<{ stdout: string; stderr: string; code: number }>
 }
 
 const WORKDIR = "/workspace/repo"
+
+// A credencial atual chega por stdin, sem persistência nem argumentos de processo.
+// Isso permite publicar trabalho de containers criados antes da configuração do token.
+export const PUBLICATION_EXEC = `
+import { spawn } from "node:child_process";
+let input = "";
+for await (const chunk of process.stdin) input += chunk;
+const request = JSON.parse(input);
+const env = { ...process.env };
+if (request.token) env.GITHUB_TOKEN = request.token;
+let args = request.args;
+if (request.command === "git" && args[0] === "push") {
+  env.GIT_TERMINAL_PROMPT = "0";
+  args = ["-c", "credential.helper=", "-c", 'credential.helper=!f() { echo username=x-access-token; echo "password=$GITHUB_TOKEN"; }; f', ...args];
+}
+const child = spawn(request.command, args, { env, stdio: ["pipe", "inherit", "inherit"] });
+child.stdin.on("error", () => {});
+child.stdin.end(request.input);
+child.on("error", () => { process.stderr.write("Não foi possível executar a publicação.\\n"); process.exitCode = 1; });
+child.on("exit", code => { process.exitCode = code ?? 1; });
+`
 
 export class DockerSandboxDriver implements SandboxDriver {
   constructor(private cfg: Config) {}
@@ -33,6 +58,7 @@ export class DockerSandboxDriver implements SandboxDriver {
       KILO_SERVER_PASSWORD: password,
       // O entrypoint sobe `kilo serve` ou a ponte (sandbox/bridge) conforme o harness.
       HARNESS: task.harness,
+      TASK_BRANCH: `squad/${task.id}`,
     }
     // Sem isolamento nativo: desliga o bwrap do Kilo (KILO_CONFIG_CONTENT tem precedência sobre KILO_CONFIG_DIR)
     // e o container volta ao perfil de segurança padrão do Docker.
@@ -41,6 +67,15 @@ export class DockerSandboxDriver implements SandboxDriver {
     for (const name of this.cfg.sandboxEnvPassthrough) {
       const value = process.env[name]
       if (value) env[name] = value
+    }
+    // O daemon monta o arquivo do host; o backend pode rodar dentro do Compose.
+    // Sem configuração, a sandbox mantém seu trust store padrão.
+    const caPath = "/opt/certs/host-ca.pem"
+    if (this.cfg.sandboxCaBundle) {
+      env.NODE_EXTRA_CA_CERTS = caPath
+      env.SSL_CERT_FILE = caPath
+      env.CURL_CA_BUNDLE = caPath
+      env.GIT_SSL_CAINFO = caPath
     }
 
     const args = [
@@ -67,6 +102,9 @@ export class DockerSandboxDriver implements SandboxDriver {
         ? ["--security-opt", "seccomp=unconfined", "--security-opt", "apparmor=unconfined", "--security-opt", "systempaths=unconfined"]
         : []),
       ...(this.cfg.sandboxNetwork ? ["--network", this.cfg.sandboxNetwork] : []),
+      ...(this.cfg.sandboxCaBundle
+        ? ["--mount", `type=bind,source=${this.cfg.sandboxCaBundle},target=${caPath},readonly`]
+        : []),
       ...Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
       this.cfg.sandboxImage,
     ]
@@ -87,8 +125,44 @@ export class DockerSandboxDriver implements SandboxDriver {
     }
   }
 
+  async restore(task: Task): Promise<SandboxHandle | undefined> {
+    const name = `squad-${task.id}`
+    let container: { Id: string; State: { Running: boolean }; Config: { Env: string[]; Labels: Record<string, string> } }
+    try {
+      const { stdout } = await exec("docker", ["inspect", name])
+      container = JSON.parse(stdout)[0]
+    } catch { return undefined }
+    if (container.Config.Labels?.["squad-task"] !== task.id || container.Config.Labels?.["squad-orchestrator"] !== "1") return undefined
+    const password = container.Config.Env.find((env) => env.startsWith("KILO_SERVER_PASSWORD="))?.slice("KILO_SERVER_PASSWORD=".length)
+    if (!password) return undefined
+    if (!container.State.Running) await exec("docker", ["start", name])
+    let baseUrl = `http://${name}:4096`
+    if (!this.cfg.sandboxUseContainerDns) {
+      const { stdout } = await exec("docker", ["port", name, "4096/tcp"])
+      const port = stdout.trim().split("\n")[0]?.split(":").pop()
+      if (!port) return undefined
+      baseUrl = `http://127.0.0.1:${port}`
+    }
+    return { id: container.Id, baseUrl, password, directory: WORKDIR, harness: task.harness }
+  }
+
   async destroy(handle: SandboxHandle) {
     await exec("docker", ["rm", "-f", handle.id]).catch(() => {})
+  }
+
+  execute(handle: SandboxHandle, command: string, args: string[], input = "") {
+    const publication = command === "node" || (command === "git" && args[0] === "push")
+    const invocation = publication ? ["node", "--input-type=module", "-e", PUBLICATION_EXEC] : [command, ...args]
+    const payload = publication ? JSON.stringify({ command, args, input, token: process.env.GITHUB_TOKEN }) : input
+    return new Promise<{ stdout: string; stderr: string; code: number }>((resolve, reject) => {
+      const child = execFile("docker", ["exec", "-i", "-w", handle.directory, handle.id, ...invocation],
+        { timeout: 120_000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+          if (err && typeof err.code !== "number") return reject(new Error("Não foi possível executar a operação na sandbox. Confira se o container está ativo."))
+          resolve({ stdout, stderr, code: err ? Number(err.code) : 0 })
+        })
+      child.stdin?.on("error", () => {})
+      child.stdin?.end(payload)
+    })
   }
 
   async isAlive(handle: SandboxHandle) {

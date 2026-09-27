@@ -98,7 +98,7 @@ export function replayStart(task: Task): TaskState {
   return {
     ...initial,
     connected: true,
-    task: { ...task, status: "queued", error: undefined, sessionID: undefined, members: {}, pendingPermissions: {} },
+    task: { ...task, status: "queued", error: undefined, publication: undefined, sessionID: undefined, members: {}, pendingPermissions: {} },
   }
 }
 
@@ -110,8 +110,15 @@ export function replayStep(state: TaskState, event: UiEvent): TaskState {
 function applyEvent(s: TaskState, e: UiEvent): TaskState {
   const d = e.data ?? {}
   switch (e.kind) {
+    case "task.publication":
+      return s.task ? { ...s, task: { ...s.task, publication: d } } : s
     case "task.status":
-      return s.task ? { ...s, task: { ...s.task, status: d.status, error: d.error ?? s.task.error } } : s
+      if (!s.task) return s
+      // Um snapshot encerrado é autoritativo, mesmo ao receber eventos antigos.
+      if (s.task.status === "stopped") return s
+      // Logs antigos encerravam turnos que falharam com idle. Preserva a falha.
+      if (d.status === "idle" && s.task.status === "error") return s
+      return { ...s, task: { ...s.task, status: d.status, error: d.status === "running" ? undefined : d.error ?? s.task.error } }
 
     case "message": {
       if (d.info) {
@@ -165,19 +172,56 @@ function applyEvent(s: TaskState, e: UiEvent): TaskState {
       const { [d.sessionID]: _, ...others } = s.retry
       // retry = o Kilo falhou ao chamar o modelo e vai tentar de novo; a mensagem diz por quê
       const retry = type === "retry" ? { ...others, [d.sessionID]: { attempt: d.status.attempt, message: d.status.message, next: d.status.next, at: e.at } } : others
-      return { ...s, sessionState: { ...s.sessionState, [d.sessionID]: type }, retry }
+      const root = d.sessionID === s.task?.sessionID
+      const failed = root && s.task?.status === "error" && type === "idle"
+      return {
+        ...s,
+        task: root && type === "busy" && s.task?.status !== "stopped" ? { ...s.task!, status: "running", error: undefined } : s.task,
+        sessionState: { ...s.sessionState, [d.sessionID]: failed ? "error" : type },
+        retry,
+      }
     }
 
     case "session.diff":
       return { ...s, diffCount: Array.isArray(d.diff) ? d.diff.length : s.diffCount }
 
-    case "error":
+    case "error": {
+      const message = d.message ?? d.error?.data?.message ?? d.error?.name ?? "erro"
+      const root = d.sessionID && d.sessionID === s.task?.sessionID
       return {
         ...s,
-        errors: [...s.errors.slice(-9), { at: e.at, message: d.message ?? d.error?.data?.message ?? d.error?.name ?? "erro", logs: d.logs }],
+        task: root ? { ...s.task!, status: s.task!.status === "stopped" ? "stopped" : "error", error: message } : s.task,
+        sessionState: root ? { ...s.sessionState, [d.sessionID]: "error" } : s.sessionState,
+        errors: [...s.errors.slice(-9), { at: e.at, message, logs: d.logs }],
       }
+    }
 
     case "raw":
+      // O Kilo remove mensagens temporárias como "Initializing snapshot…".
+      // Também trata logs antigos, que já persistiram essa remoção como raw.
+      if (d.type === "message.part.removed") {
+        const partID = d.properties?.partID
+        const part = s.parts[partID]
+        if (!part) return s
+        const { [partID]: _, ...parts } = s.parts
+        const partOrder = s.partOrder.filter((id) => id !== partID)
+        const activity = { ...s.activity }
+        // Se o texto removido é a última atividade, restaura a anterior da sessão.
+        if (activity[part.sessionID]?.at === part.at || activity[part.sessionID]?.text === lastLine(part.text)) {
+          delete activity[part.sessionID]
+          for (let i = partOrder.length - 1; i >= 0; i--) {
+            const previous = parts[partOrder[i]!]
+            if (previous.sessionID !== part.sessionID) continue
+            const text = previous.type === "tool"
+              ? `${previous.tool}${previous.toolTitle ? ` · ${previous.toolTitle}` : ""}`
+              : lastLine(previous.text)
+            if (!text) continue
+            activity[part.sessionID] = { at: previous.at ?? e.at, text }
+            break
+          }
+        }
+        return { ...s, parts, partOrder, activity }
+      }
       // A sessão raiz só existe depois que a sandbox sobe; quem abriu a tarefa antes disso
       // recebeu um snapshot sem sessionID e precisa aprender com o evento session.bound.
       if (d.type === "session.bound" && s.task) return { ...s, task: { ...s.task, sessionID: d.sessionID } }
@@ -252,6 +296,7 @@ export function useTaskStream(taskID: string) {
     // O orquestrador manda `event: <kind>`; escutamos todos pelos nomes conhecidos + "message" padrão.
     const kinds = [
       "task.status",
+      "task.publication",
       "message",
       "message.delta",
       "tool",

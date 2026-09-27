@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react"
 import { HARNESS_LABEL, api, type Harness, type HarnessInfo, type Task } from "../api"
 import { StatusDot, STATUS_LABEL, repoName, timeAgo } from "./common"
+import { describeFailure } from "../taskFailure"
 
 // Usado só se o orquestrador for antigo e não tiver GET /harnesses.
 const FALLBACK: HarnessInfo[] = [
@@ -188,6 +189,7 @@ export function TaskList({ onOpen }: { onOpen: (id: string) => void }) {
                 <div className="small muted">
                   {HARNESS_LABEL[t.harness ?? "kilo"]} · {repoName(t.repoUrl)} · {t.branch || "branch padrão"} · {Object.keys(t.members).length} membros
                 </div>
+                {t.error && <div className="small failure-status">{describeFailure(t.error).title}</div>}
               </div>
               <div style={{ textAlign: "right" }}>
                 <div className="label">{STATUS_LABEL[t.status]}</div>

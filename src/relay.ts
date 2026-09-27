@@ -42,7 +42,7 @@ export class Relay {
 
   setStatus(taskID: string, status: Task["status"], error?: string) {
     if (this.store.get(taskID)?.status === status && !error) return
-    const task = this.store.update(taskID, { status, ...(error ? { error } : {}) })
+    const task = this.store.update(taskID, { status, ...(status === "running" ? { error: undefined } : error ? { error } : {}) })
     this.publish(taskID, "task.status", { status: task.status, error: task.error })
   }
 
@@ -168,20 +168,24 @@ export class Relay {
         if (p.sessionID !== task.sessionID) return
         const type = p.status?.type
         if (type === "busy" && task.status !== "waiting_permission") this.setStatus(taskID, "running")
-        if (type === "idle") this.setStatus(taskID, "idle")
+        if (type === "idle" && !["error", "stopped"].includes(task.status)) this.setStatus(taskID, "idle")
         return
       }
 
       case "session.idle":
         this.publish(taskID, "session.status", { sessionID: p.sessionID, status: { type: "idle" } })
         if (p.sessionID === task.sessionID) {
-          this.setStatus(taskID, "idle")
+          if (!["error", "stopped"].includes(task.status)) this.setStatus(taskID, "idle")
           this.scheduleBoardRefresh(taskID)
         }
         return
 
       case "session.error":
-        return void this.publish(taskID, "error", p)
+        this.publish(taskID, "error", p)
+        if (p.sessionID === task.sessionID && task.status !== "stopped") {
+          this.setStatus(taskID, "error", p.message ?? p.error?.data?.message ?? p.error?.name ?? "O turno falhou")
+        }
+        return
 
       case "session.diff":
         return void this.publish(taskID, "session.diff", p)

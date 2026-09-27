@@ -8,12 +8,15 @@ import { DiffDrawer } from "./DiffDrawer"
 import { Permissions } from "./Permissions"
 import { ReplayBar, useReplay } from "./Replay"
 import { Squad } from "./Squad"
+import { TaskFailure } from "./TaskFailure"
 import { Stage } from "./Stage"
+import { PublicationPanel } from "./PublicationPanel"
 import { StatusTag, repoName } from "./common"
 
 export function TaskView({ taskID, onBack }: { taskID: string; onBack: () => void }) {
   const { state, dispatch } = useTaskStream(taskID)
   const [showDiff, setShowDiff] = useState(false)
+  const [showPublication, setShowPublication] = useState(false)
   const [scope, setScope] = useState<"lead" | "all">("all")
   const [view, setView] = useState<"stage" | "office" | "details">(() => {
     try {
@@ -34,6 +37,7 @@ export function TaskView({ taskID, onBack }: { taskID: string; onBack: () => voi
     }
   }
   const task = state.task
+  const publishing = task?.publication?.status === "publishing"
   const live = task && !["stopped", "error", "queued", "provisioning", "starting"].includes(task.status)
 
   // Carga inicial do board (o stream só manda snapshot quando alguém posta).
@@ -104,18 +108,21 @@ export function TaskView({ taskID, onBack }: { taskID: string; onBack: () => voi
         <button className="pill quiet" onClick={() => setShowDiff(true)} disabled={!task?.sessionID}>
           Ver diff{state.diffCount ? ` · ${state.diffCount}` : ""}
         </button>
-        <button className="pill quiet" onClick={() => api.abort(taskID)} disabled={!live}>
+        {task?.publication?.result ? <a className="pill" href={task.publication.result.url} target="_blank" rel="noopener noreferrer">Ver PR #{task.publication.result.number} ↗</a> : (
+          <button className="pill" onClick={() => setShowPublication(true)} disabled={!task?.sandbox || task.sandbox.id === "external" || task.status !== "idle" || replaying || publishing} title={task?.status !== "idle" ? "Disponível quando o turno concluir sem falhas" : "Revisar mudanças e publicar no GitHub"}>
+            {publishing ? "Publicando PR…" : task?.publication?.status === "error" ? "Revisar publicação" : "Publicar PR"}
+          </button>
+        )}
+        <button className="pill quiet" onClick={() => api.abort(taskID)} disabled={!live || publishing}>
           Parar turno
         </button>
-        <button className="pill danger" onClick={stop} disabled={!task || task.status === "stopped"}>
+        <button className="pill danger" onClick={stop} disabled={!task || task.status === "stopped" || publishing}>
           Encerrar
         </button>
       </header>
 
-      {view === "details" && task?.status === "error" && task.error && (
-        <div className="small" style={{ padding: "8px 24px", borderBottom: "1px solid var(--alert)", color: "var(--alert)" }}>
-          {task.error}
-        </div>
+      {!replaying && task?.error && ["error", "stopped"].includes(task.status) && (
+        <TaskFailure key={taskID} taskID={taskID} message={task.error} canResume={!!task.sessionID && task.status === "error"} />
       )}
 
       {view !== "details" && replaying ? (
@@ -149,6 +156,7 @@ export function TaskView({ taskID, onBack }: { taskID: string; onBack: () => voi
 
       {view === "details" && <Permissions taskID={taskID} state={state} />}
       {showDiff && <DiffDrawer taskID={taskID} onClose={() => setShowDiff(false)} />}
+      {showPublication && task && <PublicationPanel key={task.id} task={task} onClose={() => setShowPublication(false)} />}
     </div>
   )
 }

@@ -3,6 +3,7 @@ import { api } from "../api"
 import { agentColor } from "../squad"
 import type { TaskState } from "../useTaskStream"
 import { Markdown, Thinking } from "./Markdown"
+import { describeFailure } from "../taskFailure"
 
 export function Chat({ taskID, state, scope = "all" }: { taskID: string; state: TaskState; scope?: "lead" | "all" }) {
   const root = state.task?.sessionID
@@ -43,7 +44,7 @@ export function Chat({ taskID, state, scope = "all" }: { taskID: string; state: 
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void send()
   }
 
-  const canSend = !!root && state.task?.status !== "stopped"
+  const canSend = !!root && state.task?.status !== "stopped" && state.task?.publication?.status !== "publishing"
 
   return (
     <>
@@ -101,8 +102,10 @@ export function Chat({ taskID, state, scope = "all" }: { taskID: string; state: 
           <div key={i} className="msg">
             <span className="tag alert">Erro</span>
             <div className="msg-text small" style={{ marginTop: 6 }}>
-              {e.message}
+              {describeFailure(e.message).title}
             </div>
+            <div className="small muted">{describeFailure(e.message).action}</div>
+            <details className="failure-details"><summary>Detalhes técnicos</summary><pre>{e.message}</pre></details>
             {e.logs && (
               <details style={{ marginTop: 8 }}>
                 <summary className="small muted">Logs da sandbox</summary>

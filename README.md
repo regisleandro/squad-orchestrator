@@ -63,6 +63,22 @@ buffering. A API publica em `127.0.0.1:8080` e exige o token nas rotas de tarefa
 O backend monta o socket do Docker
 para gerenciar containers. Ao parar a API, suas sandboxes ativas são encerradas.
 
+Em redes corporativas com inspeção HTTPS, a máquina pode confiar em CAs que não
+existem na imagem da sandbox. Para corrigir `unable to get local issuer certificate`,
+configure apenas no `.env` local:
+
+```dotenv
+SANDBOX_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+```
+
+O arquivo deve ser um bundle PEM que já inclua as CAs corporativas e públicas,
+legível no host do daemon Docker. Ele é montado somente para leitura nas novas
+sandboxes e usado por Node/Kilo, curl e git, mantendo a validação TLS ativa.
+Os certificados não entram nas imagens nem no repositório. Em outra máquina,
+deixe `SANDBOX_CA_BUNDLE` vazio para usar os certificados padrão, ou configure o
+bundle daquela máquina. Após alterar o `.env`, recrie o serviço `orchestrator`
+e crie uma nova tarefa para que a sandbox receba a configuração.
+
 ### Desenvolvimento sem Compose
 
 ```bash
@@ -104,6 +120,53 @@ Vite + React + TypeScript, no tema "Arena" (base: design system Raycast do Refer
 
 A gaveta de diff funciona nos dois modos.
 
+A última mensagem do líder pode ser expandida com **Ler resultado completo**.
+O conteúdo completo aparece em Markdown, com rolagem própria, tanto ao vivo
+quanto no replay.
+
+### Publicar o trabalho no GitHub
+
+Quando o turno termina sem falhas, **Publicar PR** abre a revisão da branch,
+do destino e do diff completo, incluindo commits feitos pelo agente e mudanças
+sem commit. Edite título e descrição, confirme a revisão e a validação dos
+testes e publique. A confirmação dos testes é humana; o botão não executa
+automaticamente os comandos de teste do repositório.
+
+O backend cria um commit se necessário, faz push sem força e cria um PR em
+rascunho por padrão. O agente continua proibido de fazer push ou abrir PR.
+Se o conteúdo mudar após a revisão, o envio é bloqueado até uma nova revisão.
+Falhas de publicação preservam o estado e permitem tentar novamente; a busca
+por um PR existente evita duplicação inclusive quando uma resposta do GitHub
+se perde. O link e o número do PR ficam salvos na tarefa e sobrevivem ao restart.
+Um PR fechado ou mesclado exige uma nova tarefa para outra publicação.
+
+Configure `GITHUB_TOKEN` no `.env` e inclua-o em `SANDBOX_ENV_PASSTHROUGH`.
+O token deve ter acesso ao repositório com **Contents: escrita** e
+**Pull requests: escrita**. A prévia consulta o acesso ao repositório; permissões
+específicas de push e criação de PR são verificadas pelo GitHub ao executar essas
+operações. A publicação usa o token dentro da sandbox e não o envia ao navegador.
+O fluxo atende repositórios do `github.com` em sandboxes Docker.
+
+A publicação usa o `GITHUB_TOKEN` atual do backend, enviado à operação por stdin,
+sem gravá-lo no repositório. Após configurar ou trocar o token, recrie o serviço
+da API; tarefas existentes também podem publicar, sem recriar sua sandbox.
+
+Após uma interrupção do host ou da API, o startup tenta reconectar containers
+que ainda existem e suas sessões, sem reenviar o pedido ao modelo. Containers
+encerrados explicitamente pelo botão **Encerrar** não são recuperados.
+
+`npm run test:publication` verifica commit e push em repositórios locais,
+com a API do GitHub simulada, incluindo concorrência, recuperação, permissões
+e conteúdo alterado após a revisão.
+
+Falhas do turno permanecem como **Falhou**, mesmo quando o harness envia `idle`
+após o erro. Palco, Escritório e Detalhes mostram a causa em português,
+orientação para corrigir créditos, credenciais ou certificados, detalhes técnicos
+expansíveis e retomada explícita quando a sandbox ainda está disponível.
+O replay preserva essa distinção e não oferece retomada.
+Teste de regressão (com dependências da raiz e de `web/` instaladas):
+`node scripts/test-task-failure.mjs`.
+
 - **Replay** (Palco e Escritório): botão no topo reproduz o log de eventos da tarefa (`GET /tasks/:id/replay`) no mesmo reducer do modo ao vivo, com play/pause, linha do tempo com marcos, velocidade 1×–30× e "Pular esperas". Só leitura.
 - **Escritório:** clique num post-it do quadro abre o post (markdown), respostas, navegação entre posts e o que o autor fez desde o post anterior dele (mensagens, thinking, ferramentas). Na parede: relógio (hora original no replay), placar da squad, rack que pisca quando alguém trabalha, janelas que seguem a hora do dia; lâmpada de status em cada baia.
 
@@ -128,6 +191,8 @@ A UI pede o `API_TOKEN` na primeira abertura (fica no localStorage). Para uma de
 | GET | `/tasks/:id/board` | snapshot do board do Swarm (`?before=&limit=`) |
 | POST | `/tasks/:id/board/reset` | `{ revision }` |
 | GET | `/tasks/:id/diff` | diff da sessão |
+| GET | `/tasks/:id/publication` | revisão de branch, commits e diff para publicação |
+| POST | `/tasks/:id/publication` | `{ title, body, version, reviewed, draft? }`, commit/push e PR |
 | POST | `/tasks/:id/abort` | interrompe o turno |
 | DELETE | `/tasks/:id` | destrói a sandbox |
 
@@ -162,4 +227,4 @@ Auth: `Authorization: Bearer $API_TOKEN` (ou `?token=` para `EventSource`). O br
 - **Senha por tarefa** vai como env do container (visível em `docker inspect`); em produção use secret do orquestrador de containers.
 - **Store em memória com persistência em arquivo** (`DATA_DIR`, padrão `.data`): `tasks/<id>/task.json` (sem o handle da sandbox) e `tasks/<id>/events.jsonl` com todos os eventos. No boot as tarefas voltam como `stopped` e o replay lê o log completo do arquivo. Trocar por Postgres mantendo a interface do `TaskStore`.
 - **Squad fora do repo:** `sandbox/squad/{kilo.jsonc,agents/*.md}` via `KILO_CONFIG_DIR`; `.kilo/agents/*.md` do próprio repo continua valendo. O Kilo também já traz um agente primário `orchestrator` embutido, alternativa ao `squad-lead`.
-- **Fora do escopo por enquanto:** abrir PR ao final, multiusuário real.
+- **Fora do escopo por enquanto:** multiusuário real.

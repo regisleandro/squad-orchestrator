@@ -6,8 +6,8 @@ export const STATUS_LABEL: Record<TaskStatus, string> = {
   starting: "Subindo o agente",
   running: "Trabalhando",
   waiting_permission: "Aguardando você",
-  idle: "Concluído",
-  error: "Erro",
+  idle: "Turno concluído",
+  error: "Falhou",
   stopped: "Encerrado",
 }
 

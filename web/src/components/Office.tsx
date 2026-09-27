@@ -26,7 +26,7 @@ export function Office({
   boardRef.current = onBoard
   const now = useNow()
 
-  const model = useMemo(() => buildSquad(state), [state.task?.sessionID, state.task?.agent, state.members, state.permissions, state.sessionState])
+  const model = useMemo(() => buildSquad(state), [state.task?.sessionID, state.task?.agent, state.task?.status, state.members, state.permissions, state.sessionState])
 
   useEffect(() => {
     const engine = new OfficeEngine(

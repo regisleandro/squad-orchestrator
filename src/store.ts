@@ -18,6 +18,7 @@ export class TaskStore {
   private events = new Map<string, UiEvent[]>()
   private seqs = new Map<string, number>()
   private dir?: string
+  private recovery = new Map<string, { status: Task["status"]; pendingPermissions: Task["pendingPermissions"] }>()
 
   constructor(dataDir?: string) {
     if (!dataDir) return
@@ -53,6 +54,10 @@ export class TaskStore {
 
   get(id: string): Task | undefined {
     return this.tasks.get(id)
+  }
+
+  recoveryCandidates() {
+    return [...this.recovery].map(([id, previous]) => ({ task: this.tasks.get(id)!, ...previous }))
   }
 
   list(owner?: string): Task[] {
@@ -123,7 +128,11 @@ export class TaskStore {
       if (!existsSync(join(folder, "task.json"))) continue
       try {
         const task = JSON.parse(readFileSync(join(folder, "task.json"), "utf8")) as Task
+        if (task.status !== "stopped" && task.sessionID) this.recovery.set(task.id, { status: task.status, pendingPermissions: task.pendingPermissions })
         const events = readEvents(join(folder, "events.jsonl"))
+        if (task.publication?.status === "publishing") {
+          task.publication = { ...task.publication, status: "error", error: "O orquestrador reiniciou durante a publicação. Confira a branch no GitHub antes de continuar." }
+        }
         if (!TERMINAL.includes(task.status)) {
           task.status = "stopped"
           task.error = task.error ?? "orquestrador reiniciado: a sandbox desta tarefa não existe mais"

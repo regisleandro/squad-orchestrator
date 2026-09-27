@@ -27,7 +27,10 @@ if [[ ! -d "${REPO_DIR}/.git" ]]; then
   fi
 fi
 cd "${REPO_DIR}"
-git checkout -B "squad/${HOSTNAME}" >/dev/null
+# Referência estável para revisar também os commits feitos pelo agente.
+git config squad.baseBranch "$(git symbolic-ref --short HEAD)"
+git update-ref refs/squad/base HEAD
+git checkout -B "${TASK_BRANCH:-squad/${HOSTNAME}}" >/dev/null
 
 case "${HARNESS:-kilo}" in
   kilo)

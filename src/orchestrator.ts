@@ -8,8 +8,13 @@ import type { Relay } from "./relay.js"
 import type { SandboxDriver } from "./sandbox.js"
 import type { TaskStore } from "./store.js"
 import type { Task } from "./types.js"
+import { HttpError } from "./http-error.js"
+import { Publisher } from "./publication.js"
+
+export { HttpError } from "./http-error.js"
 
 export class Orchestrator {
+  readonly publisher: Publisher
   private reaper?: NodeJS.Timeout
   private queue: string[] = []
   private active = 0
@@ -20,12 +25,38 @@ export class Orchestrator {
     private relay: Relay,
     private driver: SandboxDriver,
     private maxConcurrentProvisioning = 4,
-  ) {}
+  ) {
+    this.publisher = new Publisher(store, relay, driver)
+  }
 
   /** Enfileira a tarefa; o provisionamento roda em background. */
   enqueue(task: Task) {
     this.queue.push(task.id)
     this.drain()
+  }
+
+  /** Recupera somente containers ainda existentes, sem reenviar o pedido ao LLM. */
+  async restore() {
+    if (!this.driver.restore) return
+    for (const { task, status, pendingPermissions } of this.store.recoveryCandidates()) {
+      try {
+        const sandbox = await this.driver.restore(task)
+        if (!sandbox) continue
+        await new KiloClient(sandbox).waitHealthy(60_000, 1000)
+        this.store.update(task.id, { sandbox, status, pendingPermissions, error: status === "error" ? task.error : undefined })
+        await Promise.race([this.relay.attach(task), timeout(15_000, "Não foi possível reconectar o stream")])
+        const states = await new KiloClient(sandbox).status()
+        const current = (states[task.sessionID!] as any)?.type
+        if (current === "busy") this.relay.setStatus(task.id, Object.keys(pendingPermissions).length ? "waiting_permission" : "running")
+        else if (status !== "error") this.relay.setStatus(task.id, Object.keys(pendingPermissions).length ? "waiting_permission" : "idle")
+        this.store.touch(task.id)
+        console.log(`[restore] sandbox da tarefa ${task.id} recuperada`)
+      } catch {
+        this.relay.detach(task.id)
+        this.store.update(task.id, { sandbox: undefined, status: "stopped", error: "Não foi possível recuperar a sandbox após a interrupção. O repositório do container foi preservado." })
+        console.warn(`[restore] não foi possível recuperar ${task.id}`)
+      }
+    }
   }
 
   private drain() {
@@ -75,6 +106,7 @@ export class Orchestrator {
 
   /** Follow-up do usuário na mesma sessão (ou comandos como "/goal pause"). */
   async prompt(task: Task, text: string, agent?: string) {
+    if (this.publisher.isPublishing(task.id)) throw new HttpError(409, "Aguarde a publicação do PR terminar antes de iniciar outro turno.")
     const { kilo, sessionID } = this.require(task)
     await kilo.promptAsync(sessionID, { text, agent: agent ?? task.agent, model: this.modelFor(task) })
     this.store.touch(task.id)
@@ -91,6 +123,7 @@ export class Orchestrator {
   }
 
   async destroy(task: Task) {
+    if (this.publisher.isPublishing(task.id)) throw new HttpError(409, "Aguarde a publicação do PR terminar antes de encerrar a sandbox.")
     this.relay.detach(task.id)
     this.queue = this.queue.filter((id) => id !== task.id)
     if (task.sandbox) await this.driver.destroy(task.sandbox)
@@ -112,6 +145,7 @@ export class Orchestrator {
     this.reaper = setInterval(() => {
       const now = Date.now()
       for (const task of this.store.list()) {
+        if (this.publisher.isPublishing(task.id)) continue
         if (task.status === "stopped" || task.status === "queued") continue
         if (task.status === "running" || task.status === "provisioning" || task.status === "starting") continue
         if (now - task.lastActivityAt > this.cfg.idleTtlMs) {
@@ -126,15 +160,6 @@ export class Orchestrator {
   async shutdown() {
     clearInterval(this.reaper)
     await Promise.all(this.store.list().filter((t) => t.status !== "stopped").map((t) => this.destroy(t)))
-  }
-}
-
-export class HttpError extends Error {
-  constructor(
-    public status: number,
-    message: string,
-  ) {
-    super(message)
   }
 }
 

@@ -171,6 +171,14 @@ export function createRouter(deps: { cfg: Config; store: TaskStore; relay: Relay
     return kilo.diff(sessionID)
   })
 
+  add("GET", "/tasks/:id/publication", (ctx) => orch.publisher.preview(loadTask(ctx)))
+
+  add("POST", "/tasks/:id/publication", async (ctx) => {
+    const task = loadTask(ctx)
+    const body = await readJson(ctx.req)
+    return orch.publisher.publish(task, { title: body.title, body: body.body, version: body.version, reviewed: body.reviewed, draft: body.draft })
+  })
+
   add("POST", "/tasks/:id/abort", async (ctx) => {
     await orch.abort(loadTask(ctx))
     return { ok: true }

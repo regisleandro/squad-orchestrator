@@ -13,6 +13,7 @@ const STATE_LABEL: Record<string, string> = {
   busy: "Trabalhando",
   idle: "Ocioso",
   retry: "Tentando de novo",
+  stopped: "Encerrado",
 }
 
 export function Squad({ state }: { state: TaskState }) {
@@ -21,7 +22,7 @@ export function Squad({ state }: { state: TaskState }) {
   const waitingSessions = new Set(Object.values(state.permissions).map((p) => p.sessionID))
   const childrenOf = (sessionID?: string) => members.filter((m) => (m.parentSessionID ?? root) === sessionID)
 
-  const leadState = root && waitingSessions.has(root) ? "waiting" : root ? (state.sessionState[root] ?? "busy") : "pending"
+  const leadState = state.task?.status === "stopped" ? "stopped" : state.task?.status === "error" ? "error" : root && waitingSessions.has(root) ? "waiting" : root ? (state.sessionState[root] ?? "busy") : "pending"
   const active = members.filter((m) => m.status === "running").length
 
   return (
@@ -44,7 +45,7 @@ export function Squad({ state }: { state: TaskState }) {
             <span className="label">Líder · {STATE_LABEL[leadState] ?? leadState}</span>
           </div>
           <div className="small muted" style={{ marginTop: 8 }}>
-            {(root && state.activity[root]?.text) || "Planejando…"}
+            {state.task?.status === "error" ? "Turno interrompido. Confira a falha acima." : (root && state.activity[root]?.text) || "Planejando…"}
           </div>
         </div>
 

@@ -12,6 +12,7 @@ const cfg = loadConfig()
 const store = new TaskStore(cfg.dataDir)
 const relay = new Relay(store)
 const orch = new Orchestrator(cfg, store, relay, createDriver(cfg))
+await orch.restore()
 orch.startReaper()
 
 const server = createServer(createRouter({ cfg, store, relay, orch }))

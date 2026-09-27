@@ -31,6 +31,7 @@ export interface Task {
   model?: string
   status: TaskStatus
   error?: string
+  publication?: Publication
   sandbox?: SandboxHandle
   sessionID?: string // sessão raiz (orquestradora) = dona do board do Swarm
   members: Record<string, SquadMember> // sessões filhas (subagentes `task`)
@@ -38,6 +39,36 @@ export interface Task {
   createdAt: number
   updatedAt: number
   lastActivityAt: number
+}
+
+export interface PullRequestResult {
+  number: number
+  url: string
+  branch: string
+  baseBranch: string
+  commit: string
+  draft: boolean
+}
+
+export interface Publication {
+  status: "publishing" | "published" | "error"
+  step: "checking" | "committing" | "pushing" | "creating" | "done"
+  error?: string
+  result?: PullRequestResult
+}
+
+export interface PublicationPreview {
+  branch: string
+  baseBranch: string
+  head: string
+  base: string
+  version: string
+  diff: string
+  files: number
+  commits: string[]
+  hasUncommitted: boolean
+  title: string
+  body: string
 }
 
 export interface SquadMember {
@@ -83,6 +114,7 @@ export interface KiloEvent {
  */
 export type UiEventKind =
   | "task.status"
+  | "task.publication"
   | "message" // mensagem/parte de texto da sessão
   | "message.delta" // streaming de texto
   | "tool" // tool call genérica
