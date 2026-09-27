@@ -8,6 +8,7 @@ export interface Config {
   sandboxDriver: "docker" | "external"
   sandboxImage: string
   sandboxNetwork?: string
+  sandboxUseContainerDns: boolean
   sandboxCpus: string
   sandboxMemory: string
   sandboxEnvPassthrough: string[]
@@ -28,6 +29,8 @@ export interface Config {
 }
 
 export function loadConfig(env = process.env): Config {
+  if (env.SANDBOX_USE_CONTAINER_DNS === "true" && !env.SANDBOX_NETWORK)
+    throw new Error("SANDBOX_USE_CONTAINER_DNS exige SANDBOX_NETWORK")
   const apiToken = env.API_TOKEN ?? ""
   const kiloExternalUrl = env.KILO_EXTERNAL_URL ?? "http://127.0.0.1:4096"
   const harnesses = (env.HARNESSES ?? HARNESSES.join(",")).split(",").map((s) => s.trim()).filter(isHarness)
@@ -39,6 +42,7 @@ export function loadConfig(env = process.env): Config {
     sandboxDriver: env.SANDBOX_DRIVER === "external" ? "external" : "docker",
     sandboxImage: env.SANDBOX_IMAGE ?? "squad-sandbox:dev",
     sandboxNetwork: env.SANDBOX_NETWORK || undefined,
+    sandboxUseContainerDns: env.SANDBOX_USE_CONTAINER_DNS === "true",
     sandboxCpus: env.SANDBOX_CPUS ?? "2",
     sandboxMemory: env.SANDBOX_MEMORY ?? "4g",
     sandboxEnvPassthrough: (env.SANDBOX_ENV_PASSTHROUGH ?? "")

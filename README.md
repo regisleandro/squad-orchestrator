@@ -28,6 +28,43 @@ Agentes oferecidos: no Claude Code, `squad-lead` (a squad) ou `claude` (Claude C
 
 ## Rodando
 
+### Stack local com Docker Compose
+
+O Compose sobe a API em `http://localhost:8080` e a interface em
+`http://localhost:5173`. Não exige banco: tarefas e replays ficam no volume
+`squad-data`. Cada tarefa cria sua própria sandbox, usando a imagem construída
+abaixo.
+
+```bash
+# Se ainda não tiver .env:
+cp .env.example .env
+# Ajuste API_TOKEN, modelo e credenciais do provedor no .env.
+docker compose --profile build build
+docker compose up -d --wait
+```
+
+Abra `http://localhost:5173` e informe o valor de `API_TOKEN` do `.env`.
+Escolha Kilo, Claude Code ou Codex conforme as credenciais configuradas.
+O build não precisa de chaves de LLM; uma tarefa real precisa da chave do
+provedor escolhido. As chaves são lidas em runtime e não entram nas imagens.
+
+```bash
+docker compose ps
+docker compose logs -f
+docker compose down           # mantém os dados
+docker compose up -d --wait    # sobe novamente
+```
+
+Esta configuração conecta a API e suas sandboxes pela rede Docker
+`squad-orchestrator-local`, usando DNS dos containers. Funciona com Docker Engine
+em Linux ou Docker Desktop com integração WSL habilitada. A interface publica
+em `127.0.0.1:5173` e o nginx encaminha `/api/` para a API, incluindo SSE sem
+buffering. A API publica em `127.0.0.1:8080` e exige o token nas rotas de tarefas.
+O backend monta o socket do Docker
+para gerenciar containers. Ao parar a API, suas sandboxes ativas são encerradas.
+
+### Desenvolvimento sem Compose
+
 ```bash
 npm install
 cp .env.example .env         # ajuste API_TOKEN e chaves do LLM
@@ -114,8 +151,8 @@ Auth: `Authorization: Bearer $API_TOKEN` (ou `?token=` para `EventSource`). O br
 - Rotas e formatos conferidos no código do `Kilo-Org/kilocode` (commit `c267794`, 26/09/2026).
 - Contra `@kilocode/cli` 7.8.1 real: `/global/health` (401 sem auth), `GET /event` com `server.connected`, `POST /session` com `agent`, board retornando `200` vazio antes do primeiro post, `/permission`, `/session/:id/diff`, e os 5 agentes da squad carregados via `KILO_CONFIG_DIR`. O fluxo completo do orquestrador rodou até a chamada ao LLM (parou por falta de credencial de provedor, como esperado).
 - Fluxo com o mock: squad.member, board.activity, permissão aprovada pela API e retomada, idle.
-- **Não validado ainda:** o build da imagem Docker (o ambiente onde isto foi escrito bloqueia os mirrors do Debian) e um turno real com LLM.
-- **Harnesses (27/09):** tipos da ponte conferidos contra `@anthropic-ai/claude-agent-sdk` 0.3.283 e `@openai/codex-sdk` 0.157.1. Smoke pelo orquestrador com as pontes em `BRIDGE_FAKE=1`: Claude Code com squad (4 delegações, developer ×2), board com autoria certa por subagente, VETO, permissão de `npm install` aprovada pela API, diff do git e idle; Codex com passos, diff, follow-up e abort. **Não validado:** turno real com LLM em cada ponte e a imagem com a ponte instalada.
+- **Docker local:** imagens da API, interface e sandbox construídas; API e nginx saudáveis; proxy, recursos da interface e autenticação validados. As pontes rodaram em containers com `BRIDGE_FAKE=1` até `idle`, incluindo permissão, board, diff e replay. Não foi executado turno real com LLM.
+- **Harnesses (27/09):** tipos da ponte conferidos contra `@anthropic-ai/claude-agent-sdk` 0.3.283 e `@openai/codex-sdk` 0.157.1. Smoke pelo orquestrador com as pontes em `BRIDGE_FAKE=1`: Claude Code com squad (4 delegações, developer ×2), board com autoria certa por subagente, VETO, permissão de `npm install` aprovada pela API, diff do git e idle; Codex com passos, diff, follow-up e abort. **Não validado:** turno real com LLM em cada ponte.
 
 ## Decisões e gaps do POC
 

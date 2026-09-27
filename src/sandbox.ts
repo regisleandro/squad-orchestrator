@@ -52,9 +52,8 @@ export class DockerSandboxDriver implements SandboxDriver {
       "squad-orchestrator=1",
       "--label",
       `squad-task=${task.id}`,
-      // Porta publicada só no loopback do host, porta aleatória. O browser nunca fala com ela.
-      "-p",
-      "127.0.0.1::4096",
+      // Backend no host usa loopback; no Compose usa DNS da rede Docker.
+      ...(this.cfg.sandboxUseContainerDns ? [] : ["-p", "127.0.0.1::4096"]),
       "--cpus",
       this.cfg.sandboxCpus,
       "--memory",
@@ -75,6 +74,8 @@ export class DockerSandboxDriver implements SandboxDriver {
     const id = stdout.trim()
 
     try {
+      if (this.cfg.sandboxUseContainerDns)
+        return { id, baseUrl: `http://squad-${task.id}:4096`, password, directory: WORKDIR, harness: task.harness }
       const { stdout: portOut } = await exec("docker", ["port", id, "4096/tcp"])
       // ex.: "127.0.0.1:49153"
       const hostPort = portOut.trim().split("\n")[0]?.split(":").pop()

@@ -1,0 +1,49 @@
+name: squad-orchestrator
+services:
+  orchestrator:
+    image: squad-orchestrator:local
+    build: .
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    env_file: .env
+    environment:
+      PORT: "8080"
+      SANDBOX_DRIVER: docker
+      SANDBOX_NETWORK: squad-orchestrator-local
+      SANDBOX_USE_CONTAINER_DNS: "true"
+      DATA_DIR: /app/data
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - squad-data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "--input-type=module", "-e", "const r = await fetch('http://127.0.0.1:8080/health', {headers: {Authorization: 'Bearer ' + process.env.API_TOKEN}}); if (!r.ok) process.exit(1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+  web:
+    image: squad-web:local
+    build: ./web
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5173:80"
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+  # Constrói a imagem; as instâncias são criadas pelo backend, uma por tarefa.
+  sandbox:
+    image: ${SANDBOX_IMAGE:-squad-sandbox:dev}
+    build: ./sandbox
+    profiles: ["build"]
+volumes:
+  squad-data:
+networks:
+  default:
+    name: squad-orchestrator-local

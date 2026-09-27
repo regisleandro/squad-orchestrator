@@ -6,7 +6,7 @@
 #   docker build --build-arg KILO_NPM_PACKAGE=@sua-org/kilo-cli@0.1.0 -t squad-sandbox:dev sandbox
 FROM node:22-bookworm-slim
 
-ARG KILO_NPM_PACKAGE=@kilocode/cli@latest
+ARG KILO_NPM_PACKAGE=@kilocode/cli@7.8.1
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates bubblewrap ripgrep curl openssh-client \
@@ -16,8 +16,8 @@ RUN npm install -g "${KILO_NPM_PACKAGE}" && kilo --version
 
 # Ponte de harness: Claude Agent SDK e @openai/codex-sdk (cada um traz o binário da plataforma).
 # Roda com o strip-types do Node 22 (sem build). Fica antes da squad para aproveitar o cache.
-COPY bridge/package.json /opt/bridge/package.json
-RUN cd /opt/bridge && npm install --omit=dev && npm cache clean --force
+COPY bridge/package.json bridge/package-lock.json /opt/bridge/
+RUN cd /opt/bridge && npm ci --omit=dev && npm cache clean --force
 COPY bridge/src/ /opt/bridge/src/
 
 # Config da squad fora do repo: kilo.jsonc + agents/*.md. O Kilo carrega KILO_CONFIG_DIR

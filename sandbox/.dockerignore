@@ -1,0 +1,4 @@
+bridge/node_modules
+bridge/dist
+.env
+.env.*
