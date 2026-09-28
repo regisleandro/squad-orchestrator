@@ -13,7 +13,9 @@
     "test:publication": "npm run build && node scripts/publication.test.mjs",
     "mock:kilo": "tsx scripts/mock-kilo.ts",
     "smoke": "tsx scripts/smoke.ts",
-    "sandbox:build": "docker build -t squad-sandbox:dev sandbox"
+    "sandbox:build": "docker build -t squad-sandbox:dev sandbox",
+    "sandbox:build:aic": "bash scripts/build-sandbox-aic.sh",
+    "aic:auth:prepare": "node scripts/prepare-aic-auth.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

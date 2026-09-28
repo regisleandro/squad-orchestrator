@@ -1,7 +1,7 @@
 // Smoke test ponta a ponta contra o orquestrador já rodando (driver external + mock, ou docker real).
 // Cria uma tarefa, segue o SSE, aprova a primeira permissão e espera a sessão ficar idle.
 // Uso: ORCH_URL=http://127.0.0.1:8080 API_TOKEN=... REPO_URL=https://github.com/octocat/Hello-World npx tsx scripts/smoke.ts
-// HARNESS=claude-code|codex escolhe o harness (padrão: o do orquestrador).
+// HARNESS=kilo|claude-code|codex|aic escolhe o harness (padrão: o do orquestrador).
 
 import { parseSse } from "../src/kilo.js"
 

@@ -12,7 +12,7 @@
 //   POST /permission/:requestID/reply?directory= -> { reply: once|always|reject, message?, interactive? }
 //   GET  /kilocode/session/:id/board?directory=&before=&limit=  -> SessionBoard
 //   POST /kilocode/session/:id/board/reset?directory=           -> body { revision }
-// Auth: Basic kilo:<KILO_SERVER_PASSWORD> (usuário padrão "kilo", KILO_SERVER_USERNAME muda).
+// Auth: Basic kilo:<KILO_SERVER_PASSWORD>; para AI Cockpit, Basic aic:<AIC_EXTERNAL_PASSWORD>.
 //
 // Usamos fetch puro em vez de @kilocode/sdk para não acoplar a versão do SDK à do
 // binário na imagem; trocar por `createKiloClient` do SDK é direto se preferir.
@@ -55,7 +55,8 @@ export class KiloClient {
   private auth: string
 
   constructor(private sandbox: SandboxHandle) {
-    this.auth = "Basic " + Buffer.from(`kilo:${sandbox.password}`).toString("base64")
+    const username = sandbox.harness === "aic" ? "aic" : "kilo"
+    this.auth = "Basic " + Buffer.from(`${username}:${sandbox.password}`).toString("base64")
   }
 
   private url(path: string, query: Record<string, string | number | undefined> = {}) {
@@ -106,7 +107,9 @@ export class KiloClient {
     // Kilo exige provider/model; a ponte aceita só o id (ex.: "sonnet"), então repassamos assim.
     const model =
       parseModel(input.model) ??
-      (input.model && this.sandbox.harness !== "kilo" ? { providerID: this.sandbox.harness, modelID: input.model } : undefined)
+      (input.model && this.sandbox.harness !== "kilo" && this.sandbox.harness !== "aic"
+        ? { providerID: this.sandbox.harness, modelID: input.model }
+        : undefined)
     await this.request("POST", `/session/${sessionID}/prompt_async`, {
       agent: input.agent,
       model,

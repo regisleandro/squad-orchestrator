@@ -1,10 +1,11 @@
 # squad-orchestrator (POC)
 
-Backend que faz o papel do "mini Kilo Cloud": recebe uma tarefa `(repoUrl, branch, prompt, harness)`, sobe um container por tarefa com `kilo serve` (ou a ponte do Claude Code / Codex), cria a sessão da squad, assina o SSE do harness e republica eventos classificados para a UI web. Ações da UI (follow-up, permissões, reset do board) voltam como POSTs diretos na sandbox.
+Backend que faz o papel do "mini Kilo Cloud": recebe uma tarefa `(repoUrl, branch, prompt, harness)`, sobe um container por tarefa com `kilo serve`, `aic serve` ou a ponte do Claude Code / Codex, cria a sessão, assina o SSE do harness e republica eventos classificados para a UI web. Ações da UI (follow-up, permissões, reset do board) voltam como POSTs diretos no servidor do harness.
 
 ```
 browser ──HTTPS/SSE──> squad-orchestrator ──HTTP+SSE (Basic kilo:<senha por tarefa>)──> kilo serve  (HARNESS=kilo)
-                                                                                    └─> ponte     (HARNESS=claude-code | codex)
+                                                                                    ├─> ponte     (HARNESS=claude-code | codex)
+                                                                                    └─> aic serve (HARNESS=aic)
 ```
 
 ## Harness: Kilo Code, Claude Code ou Codex
@@ -25,6 +26,52 @@ A tarefa escolhe o harness na criação (`harness` no `POST /tasks`, seletor na 
 Agentes oferecidos: no Claude Code, `squad-lead` (a squad) ou `claude` (Claude Code puro, sem squad nem board); no Codex, só `codex`. O `CLAUDE.md` e o `.claude/` do repo continuam valendo (`settingSources: ["project"]`), como o `.kilo/` no Kilo. O sandbox próprio do Codex (landlock/seccomp) costuma falhar dentro do Docker, então o padrão é `CODEX_SANDBOX_MODE=danger-full-access`, na mesma linha da decisão de isolamento só pelo container.
 
 **Roteiros fake (`BRIDGE_FAKE=1`):** a ponte troca os SDKs por roteiros gravados no formato deles, que passam pelos mesmos mapeamentos. Servem para demo e teste sem LLM, como o `scripts/mock-kilo.ts`.
+
+### AI Cockpit com um container por tarefa
+
+O `aic serve` expõe as rotas HTTP/SSE usadas pelo orquestrador (`/global/health`, `/event`, `/session`, `/session/status`, `/permission` e `/kilocode/session/:id/board`). A imagem `squad-sandbox:aic` acrescenta **uma cópia da instalação local do `aic`** à sandbox padrão, sem baixar o CLI nem embutir credenciais. Ela carrega a mesma squad de `sandbox/squad/agents/`: `squad-lead` é o padrão, delega a architect/developer/reviewer/qa com a tool `task` e usa o board nativo. `code` também está disponível para tarefas de agente único. Permissões seguem `sandbox/squad/aicockpit.jsonc`.
+
+Com o CLI `aic` no `PATH` do host, prepare um arquivo de autenticação restrito e construa a imagem:
+
+```bash
+npm run aic:auth:prepare
+npm run sandbox:build:aic
+```
+
+O primeiro comando lê o login já existente do AI Cockpit e grava apenas as entradas da conta AI Cockpit em `.data/aic-auth.json` (permissão `0600`, ignorado pelo Git). O segundo resolve o destino real do `aic` no host e copia **todo o diretório dessa versão** para a imagem. Se o CLI estiver fora do `PATH`, use `AIC_CLI_DIR=/caminho/do/diretorio npm run sandbox:build:aic`. Para atualizar a versão da imagem após trocar o CLI local, execute o build novamente.
+
+No `.env`, configure:
+
+```dotenv
+SANDBOX_DRIVER=docker
+SANDBOX_IMAGE=squad-sandbox:aic
+HARNESSES=kilo,claude-code,codex,aic
+AIC_AUTH_FILE=/caminho/absoluto/para/squad-orchestrator/.data/aic-auth.json
+# Opcional, no formato provider/model:
+AIC_MODEL=
+```
+
+`AIC_AUTH_FILE` é um caminho no **host do daemon Docker**. No Docker Desktop com WSL, use o caminho UNC mostrado por `wslpath -w "$(realpath .data/aic-auth.json)"` (começa com `\\wsl.localhost\`), pois o daemon não encontra o caminho Linux `/home/...` diretamente. O orquestrador monta o arquivo somente nas tarefas `aic`, com acesso de leitura, e o entrypoint cria uma cópia privada dentro do container para o CLI poder renovar a sessão. O arquivo não entra no build. Depois, suba `docker compose up -d --build --wait` (ou `docker.exe compose up -d --build --wait` no WSL sem integração do comando `docker`) e crie uma tarefa com **AI Cockpit** na UI. O build genérico do Compose cria a sandbox padrão (`squad-sandbox:dev`); para recriar `squad-sandbox:aic`, rode `npm run sandbox:build:aic`.
+
+### AI Cockpit local, sem Docker
+
+Inicie o `aic serve` no **repositório que será trabalhado**. O driver `external` usa esse diretório existente; ele não clona a URL da tarefa. A URL informada na UI deve corresponder ao mesmo repositório.
+
+```bash
+cd /caminho/do/repo-alvo
+AICOCKPIT_CONFIG_DIR=/caminho/do/squad-orchestrator/sandbox/squad \
+  AICOCKPIT_SERVER_PASSWORD=uma-senha-local aic serve --hostname 127.0.0.1 --port 4096
+```
+
+Em outro terminal, na raiz deste projeto, configure o orquestrador (também no host):
+
+```bash
+API_TOKEN=tok SANDBOX_DRIVER=external HARNESSES=aic DEFAULT_HARNESS=aic \
+  EXTERNAL_URL_AIC=http://127.0.0.1:4096 AIC_EXTERNAL_PASSWORD=uma-senha-local \
+  KILO_EXTERNAL_DIRECTORY=/caminho/do/repo-alvo npm run dev
+```
+
+Suba a UI com `cd web && npm run dev` e selecione **AI Cockpit**. O usuário Basic padrão do `aic serve` é `aic`. O modelo pode ficar vazio para usar o padrão da conta, ou ser informado como `provider/model` (por exemplo, um id retornado por `aic models`). A autenticação da conta e a organização ativa são as do CLI instalado no host; configure ambas no `aic` antes de enviar uma tarefa. As limitações de publicação do driver `external` também se aplicam aqui.
 
 ## Rodando
 
@@ -74,6 +121,10 @@ SANDBOX_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 O arquivo deve ser um bundle PEM que já inclua as CAs corporativas e públicas,
 legível no host do daemon Docker. Ele é montado somente para leitura nas novas
 sandboxes e usado por Node/Kilo, curl e git, mantendo a validação TLS ativa.
+No Docker Desktop com WSL, use um caminho do host aceito pelo daemon, como o
+caminho Windows retornado por `wslpath -w /mnt/c/caminho/ca_bundle.pem` ou um
+caminho UNC para um arquivo no WSL. Um caminho Linux `/etc/...` do WSL não é
+visível diretamente ao daemon do Docker Desktop.
 Os certificados não entram nas imagens nem no repositório. Em outra máquina,
 deixe `SANDBOX_CA_BUNDLE` vazio para usar os certificados padrão, ou configure o
 bundle daquela máquina. Após alterar o `.env`, recrie o serviço `orchestrator`

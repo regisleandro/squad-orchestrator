@@ -1,5 +1,5 @@
 # Imagem da sandbox: kilo serve + git + bubblewrap + a ponte de harness (Claude Code e Codex).
-# Um container por tarefa; HARNESS=kilo|claude-code|codex escolhe quem sobe na porta 4096.
+# Um container por tarefa; a variante Dockerfile.aic acrescenta o CLI local para HARNESS=aic.
 #
 # Para usar o seu fork em vez do pacote oficial, publique o CLI forkado num registry
 # (ou copie o tarball de `bun run build`) e troque KILO_NPM_PACKAGE, ex.:
@@ -20,11 +20,14 @@ COPY bridge/package.json bridge/package-lock.json /opt/bridge/
 RUN cd /opt/bridge && npm ci --omit=dev && npm cache clean --force
 COPY bridge/src/ /opt/bridge/src/
 
-# Config da squad fora do repo: kilo.jsonc + agents/*.md. O Kilo carrega KILO_CONFIG_DIR
+# Config da squad fora do repo: kilo.jsonc, aicockpit.jsonc e agents/*.md.
+# Kilo e AI Cockpit carregam seus respectivos diretórios de configuração.
+# O Kilo carrega KILO_CONFIG_DIR
 # como diretório de config confiável; .kilo/agents/*.md do próprio repo continua valendo
 # e pode sobrescrever agentes com o mesmo nome.
 COPY squad/ /opt/squad/
 ENV KILO_CONFIG_DIR=/opt/squad \
+    AICOCKPIT_CONFIG_DIR=/opt/squad \
     SQUAD_DIR=/opt/squad \
     KILO_DISABLE_AUTOUPDATE=1 \
     REPO_DIR=/workspace/repo

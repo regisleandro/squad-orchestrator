@@ -41,7 +41,7 @@ function App() {
               Squad Arena
             </span>
           </a>
-          <span className="label">Kilo · Claude Code · Codex · self-hosted</span>
+          <span className="label">Kilo · Claude Code · Codex · AI Cockpit · self-hosted</span>
         </header>
       )}
       {taskID ? <TaskView taskID={taskID} onBack={() => go("/")} /> : <TaskList onOpen={(id) => go(`/tasks/${id}`)} />}

@@ -56,13 +56,17 @@ export class DockerSandboxDriver implements SandboxDriver {
       REPO_BRANCH: task.branch,
       REPO_DIR: WORKDIR,
       KILO_SERVER_PASSWORD: password,
-      // O entrypoint sobe `kilo serve` ou a ponte (sandbox/bridge) conforme o harness.
+      ...(task.harness === "aic" ? { AICOCKPIT_SERVER_PASSWORD: password } : {}),
+      // O entrypoint sobe o servidor do harness conforme a tarefa.
       HARNESS: task.harness,
       TASK_BRANCH: `squad/${task.id}`,
     }
     // Sem isolamento nativo: desliga o bwrap do Kilo (KILO_CONFIG_CONTENT tem precedência sobre KILO_CONFIG_DIR)
     // e o container volta ao perfil de segurança padrão do Docker.
-    if (!this.cfg.sandboxNativeIsolation) env.KILO_CONFIG_CONTENT = JSON.stringify({ sandbox: { enabled: false } })
+    if (!this.cfg.sandboxNativeIsolation) {
+      env.KILO_CONFIG_CONTENT = JSON.stringify({ sandbox: { enabled: false } })
+      if (task.harness === "aic") env.AICOCKPIT_CONFIG_CONTENT = env.KILO_CONFIG_CONTENT
+    }
     if (process.env.CODEX_SANDBOX_MODE) env.CODEX_SANDBOX_MODE = process.env.CODEX_SANDBOX_MODE
     for (const name of this.cfg.sandboxEnvPassthrough) {
       const value = process.env[name]
@@ -104,6 +108,9 @@ export class DockerSandboxDriver implements SandboxDriver {
       ...(this.cfg.sandboxNetwork ? ["--network", this.cfg.sandboxNetwork] : []),
       ...(this.cfg.sandboxCaBundle
         ? ["--mount", `type=bind,source=${this.cfg.sandboxCaBundle},target=${caPath},readonly`]
+        : []),
+      ...(task.harness === "aic" && this.cfg.aicAuthFile
+        ? ["--mount", `type=bind,source=${this.cfg.aicAuthFile},target=/run/secrets/aic-auth.json,readonly`]
         : []),
       ...Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
       this.cfg.sandboxImage,
@@ -193,7 +200,7 @@ export class ExternalSandboxDriver implements SandboxDriver {
       id: "external",
       harness: task.harness,
       baseUrl: this.cfg.externalUrls[task.harness],
-      password: this.cfg.kiloExternalPassword,
+      password: task.harness === "aic" ? this.cfg.aicExternalPassword : this.cfg.kiloExternalPassword,
       directory: this.cfg.kiloExternalDirectory,
     }
   }

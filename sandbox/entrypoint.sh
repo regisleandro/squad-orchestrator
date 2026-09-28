@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Clona o repo da tarefa e sobe o harness: `kilo serve`, ou a ponte (sandbox/bridge) para
-# Claude Code e Codex, que responde o mesmo protocolo. O health (/global/health) só responde
+# Clona o repo da tarefa e sobe o harness: `kilo serve`, `aic serve`, ou a ponte
+# (sandbox/bridge) para Claude Code e Codex. O health (/global/health) só responde
 # depois do clone, então o orquestrador usa o health como "sandbox pronta".
 set -euo pipefail
 
@@ -40,6 +40,17 @@ case "${HARNESS:-kilo}" in
   claude-code | codex)
     echo "[sandbox] subindo a ponte (${HARNESS})"
     exec env REPO_DIR="${REPO_DIR}" PORT=4096 node /opt/bridge/src/server.ts
+    ;;
+  aic)
+    if [[ ! -r /run/secrets/aic-auth.json ]]; then
+      echo "[sandbox] auth do AI Cockpit não está acessível; confira AIC_AUTH_FILE" >&2
+      exit 1
+    fi
+    mkdir -p "${HOME}/.local/share/aicockpit"
+    cp /run/secrets/aic-auth.json "${HOME}/.local/share/aicockpit/auth.json"
+    chmod 600 "${HOME}/.local/share/aicockpit/auth.json"
+    echo "[sandbox] subindo aic serve"
+    exec aic serve --port 4096 --hostname 0.0.0.0
     ;;
   *)
     echo "[sandbox] HARNESS desconhecido: ${HARNESS}" >&2

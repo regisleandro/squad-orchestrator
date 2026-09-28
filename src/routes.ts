@@ -78,6 +78,8 @@ export function createRouter(deps: { cfg: Config; store: TaskStore; relay: Relay
     const harness = body.harness === undefined || body.harness === "" ? cfg.defaultHarness : body.harness
     if (!isHarness(harness) || !cfg.harnesses.includes(harness))
       throw new HttpError(400, `harness inválido; habilitados: ${cfg.harnesses.join(", ")}`)
+    if (harness === "aic" && body.model && !/^[^/]+\/.+$/.test(String(body.model)))
+      throw new HttpError(400, "modelo do AI Cockpit deve usar provider/model")
     const defaultAgent = harness === "kilo" ? cfg.squadLeadAgent : HARNESS_INFO[harness].defaultAgent
     const task = store.create(ctx.user, {
       repoUrl,

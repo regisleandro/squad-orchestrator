@@ -1,0 +1,10 @@
+# syntax=docker/dockerfile:1.4
+# Imagem derivada da sandbox padrão. O contexto nomeado `aic` é o diretório da
+# instalação local do CLI, passado por scripts/build-sandbox-aic.sh.
+ARG BASE_SANDBOX_IMAGE=squad-sandbox:base
+FROM ${BASE_SANDBOX_IMAGE}
+
+COPY --from=aic --chown=node:node / /opt/aic/
+ENV PATH="/opt/aic:${PATH}"
+
+RUN test -x /opt/aic/aic && /opt/aic/aic --version

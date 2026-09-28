@@ -22,7 +22,7 @@ const FALLBACK: HarnessInfo[] = [
 /** Uma linha sobre o que o harness entrega da squad, para escolher sabendo o que muda. */
 function capabilityLine(h: HarnessInfo) {
   const { squad, board, permissions } = h.capabilities
-  const who = h.id === "kilo" ? "Squad nativa" : squad ? "Squad como subagentes" : "Agente único"
+  const who = h.id === "kilo" || h.id === "aic" ? "Squad nativa" : squad ? "Squad como subagentes" : "Agente único"
   const extras = [board && "board", permissions && "permissões"].filter(Boolean)
   return extras.length ? `${who}, ${extras.join(" e ")}.` : `${who}, sem board nem aprovações.`
 }

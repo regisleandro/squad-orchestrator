@@ -5,9 +5,10 @@
 //   claude-code -> ponte em sandbox/bridge com o Claude Agent SDK (subagentes = a mesma squad,
 //                  board emulado via MCP in-process, permissões via canUseTool + kilo.jsonc)
 //   codex       -> ponte com o @openai/codex-sdk (um agente só, sem board, sem aprovação interativa)
+//   aic         -> `aic serve` direto (mesma squad nativa, board e permissões)
 // A UI usa `capabilities` para avisar o que não existe naquele harness.
 
-export const HARNESSES = ["kilo", "claude-code", "codex"] as const
+export const HARNESSES = ["kilo", "claude-code", "codex", "aic"] as const
 export type Harness = (typeof HARNESSES)[number]
 
 export interface HarnessInfo {
@@ -59,6 +60,18 @@ export const HARNESS_INFO: Record<Harness, HarnessInfo> = {
     capabilities: { squad: false, board: false, permissions: false },
     note: "Agente único: sem subagentes, sem board e sem pedidos de permissão (o container é o isolamento).",
     modelHint: "id do modelo da OpenAI, ex.: gpt-5-codex",
+  },
+  aic: {
+    id: "aic",
+    label: "AI Cockpit",
+    defaultAgent: "squad-lead",
+    agents: [
+      { value: "squad-lead", label: "squad-lead (squad própria)" },
+      { value: "code", label: "code (agente único)" },
+    ],
+    capabilities: { squad: true, board: true, permissions: true },
+    note: "A squad usa os agentes e o board nativos do AI Cockpit.",
+    modelHint: "provider/model, como aparece em aic models",
   },
 }
 

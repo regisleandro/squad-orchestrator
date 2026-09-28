@@ -39,7 +39,7 @@ services:
       retries: 3
   # Constrói a imagem; as instâncias são criadas pelo backend, uma por tarefa.
   sandbox:
-    image: ${SANDBOX_IMAGE:-squad-sandbox:dev}
+    image: squad-sandbox:dev
     build: ./sandbox
     profiles: ["build"]
 volumes:

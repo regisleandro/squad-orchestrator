@@ -10,7 +10,7 @@ export type TaskStatus =
   | "error"
   | "stopped"
 
-export type Harness = "kilo" | "claude-code" | "codex"
+export type Harness = "kilo" | "claude-code" | "codex" | "aic"
 
 export interface HarnessInfo {
   id: Harness
@@ -22,7 +22,7 @@ export interface HarnessInfo {
   modelHint: string
 }
 
-export const HARNESS_LABEL: Record<Harness, string> = { kilo: "Kilo Code", "claude-code": "Claude Code", codex: "Codex" }
+export const HARNESS_LABEL: Record<Harness, string> = { kilo: "Kilo Code", "claude-code": "Claude Code", codex: "Codex", aic: "AI Cockpit" }
 
 export interface SquadMember {
   callID: string
